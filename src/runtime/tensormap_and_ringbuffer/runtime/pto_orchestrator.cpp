@@ -15,6 +15,7 @@
 #include <string.h>
 
 #include "pto_tensormap.h"
+#include "pto_types.h"
 #include "tensor.h"
 
 // =============================================================================
@@ -222,22 +223,6 @@ void pto2_add_consumer_to_producer(
     pto2_fanout_unlock(producer);
 }
 
-void* pto2_alloc_packed_buffer(PTO2OrchestratorState* orch, int32_t total_size) {
-    if (total_size <= 0) {
-        return NULL;
-    }
-
-    void* buffer = pto2_heap_ring_alloc(&orch->heap_ring, total_size);
-
-    orch->buffers_allocated++;
-    orch->bytes_allocated += total_size;
-
-    // Update shared memory with new heap top
-    PTO2_STORE_RELEASE(&orch->sm_handle->header->heap_top, orch->heap_ring.top);
-
-    return buffer;
-}
-
 void pto2_submit_task(PTO2OrchestratorState* orch,
     int32_t kernel_id,
     PTO2WorkerType worker_type,
@@ -254,7 +239,7 @@ void pto2_submit_task(PTO2OrchestratorState* orch,
     assert(orch->scope_stack_top >= 0 && "Cannot submit task outside a scope");
 
     // === STEP 1: Allocate task slot from Task Ring (blocks until available) ===
-    int32_t task_id = pto2_task_ring_alloc(&orch->task_ring);
+    int32_t task_id = orch->task_ring.pto2_task_ring_alloc();
 
     CYCLE_COUNT_LAP(g_orch_alloc_cycle);
 
@@ -272,14 +257,10 @@ void pto2_submit_task(PTO2OrchestratorState* orch,
     task->fanout_count = 1;
     task->packed_buffer_base = NULL;
     task->packed_buffer_end = NULL;
-    task->num_outputs = 0;
     task->is_active = true;
 
     // Register this task in its owning scope
     scope_tasks_push(orch, task_id);
-
-    // Temporary storage for collecting output sizes
-    int32_t total_output_size = 0;
 
     // Temporary storage for fanin
     int32_t fanin_temp[PTO2_MAX_INPUTS];
@@ -297,8 +278,28 @@ void pto2_submit_task(PTO2OrchestratorState* orch,
 
     CYCLE_COUNT_LAP(g_orch_params_cycle);
 
-    // === STEP 2: First pass - collect output sizes and process inputs ===
+    // Temporary storage for collecting output sizes
+    int32_t total_output_size = 0;
+    for (int i = 0; i < num_params; i++) {
+        PTOParam& p = task->params[i];
+        if (p.type != PTOParamType::OUTPUT) {
+            continue;
+        }
+        auto& tensor_data = p.tensor.data();
+        // Only allocate from ring buffer when caller did not provide an address
+        if (tensor_data.buffer.addr == 0) {
+            total_output_size += PTO2_ALIGN_UP(tensor_data.buffer.size, PTO2_PACKED_OUTPUT_ALIGN);
+        }
+    }
 
+    if (total_output_size > 0) {
+        task->packed_buffer_base = orch->pto2_alloc_packed_buffer(total_output_size);
+        task->packed_buffer_end = (char*)task->packed_buffer_base + total_output_size;
+    }
+    CYCLE_COUNT_LAP(g_orch_heap_cycle);
+
+    // === STEP 2: First pass - set output addr and process tensor ===
+    int32_t offset = 0;
     for (int i = 0; i < num_params; i++) {
         PTOParam& p = task->params[i];
 
@@ -307,11 +308,10 @@ void pto2_submit_task(PTO2OrchestratorState* orch,
             case PTOParamType::INPUT: {
                 // Look up producer via TensorMap
                 PTO2LookupResult lookup_result;
-                orch->tensor_map.lookup(p.tensor, &lookup_result);
+                orch->tensor_map.lookup(p.tensor, lookup_result);
 
                 for (int r = 0; r < lookup_result.count; r++) {
-                    int32_t entry_idx = lookup_result.entries[r].entry_idx;
-                    auto &entry = orch->tensor_map.entry_pool[entry_idx];
+                    PTO2TensorMapEntry &entry = *lookup_result.entries[r].entry;
                     auto overlap_status = lookup_result.entries[r].overlap_status;
                     // Check if this producer is already in fanin list (avoid duplicates)
                     int producer_task_id = entry.producer_task_id;
@@ -339,7 +339,7 @@ void pto2_submit_task(PTO2OrchestratorState* orch,
                         // 应将前面的tensor从tensor map中剔除。
                         // 但是最开始的tensor除外，因为必须建立和最开始的task的依赖关系以保证tensor生命周期的正确管理
                         if (!entry.with_alloc) {
-                            orch->tensor_map.remove_entry(entry_idx);
+                            orch->tensor_map.remove_entry(entry);
                         }
                     }
                 }
@@ -348,9 +348,12 @@ void pto2_submit_task(PTO2OrchestratorState* orch,
 
             case PTOParamType::OUTPUT: {
                 auto &tensor_data = p.tensor.data();
-                // Only allocate from ring buffer when caller did not provide an address
+                // Offsets: each output at 1024B-aligned slot; slot size = ALIGN_UP(size, 1024)
+                // Allocation happens here only; no memcpy of buffer content. Caller's tensor gets addr written back.
                 if (tensor_data.buffer.addr == 0) {
-                    total_output_size += PTO2_ALIGN_UP(tensor_data.buffer.size, PTO2_PACKED_OUTPUT_ALIGN);
+                    uint64_t alloc_addr = reinterpret_cast<uint64_t>((char*)task->packed_buffer_base + offset);
+                    tensor_data.buffer.addr = alloc_addr;
+                    offset += PTO2_ALIGN_UP(tensor_data.buffer.size, PTO2_PACKED_OUTPUT_ALIGN);
                 }
                 break;
             }
@@ -360,31 +363,6 @@ void pto2_submit_task(PTO2OrchestratorState* orch,
     }
 
     CYCLE_COUNT_LAP(g_orch_lookup_cycle);
-
-    // === STEP 3: Allocate packed buffer from Heap Ring (may stall) ===
-    // Each output slot is aligned to PTO2_PACKED_OUTPUT_ALIGN (1024B); gap after data is padding.
-    if (total_output_size > 0) {
-        task->packed_buffer_base = pto2_alloc_packed_buffer(orch, total_output_size);
-        task->packed_buffer_end = (char*)task->packed_buffer_base + total_output_size;
-
-        // Offsets: each output at 1024B-aligned slot; slot size = ALIGN_UP(size, 1024)
-        // Allocation happens here only; no memcpy of buffer content. Caller's tensor gets addr written back.
-        int32_t offset = 0;
-        for (int i = 0; i < task->param_count; i++) {
-            PTOParam& p = task->params[i];
-            if (p.type == PTOParamType::OUTPUT) {
-                auto &tensor_data = p.tensor.data();
-                if (tensor_data.buffer.addr == 0) {
-                    uint64_t alloc_addr = reinterpret_cast<uint64_t>((char*)task->packed_buffer_base + offset);
-                    tensor_data.buffer.addr = alloc_addr;
-                    offset += PTO2_ALIGN_UP(tensor_data.buffer.size, PTO2_PACKED_OUTPUT_ALIGN);
-                }
-                task->output_index[task->num_outputs++] = i;
-            }
-        }
-    }
-
-    CYCLE_COUNT_LAP(g_orch_heap_cycle);
 
     // === STEP 4: Second pass - register outputs in TensorMap ===
     for (int i = 0; i < num_params; i++) {
