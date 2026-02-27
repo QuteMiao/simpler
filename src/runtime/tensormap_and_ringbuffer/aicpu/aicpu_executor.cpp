@@ -1101,18 +1101,6 @@ int AicpuExecutor::run(Runtime* runtime) {
                 DEV_ALWAYS("  finalize+SM    : %.3fus (%.1f%%)", cycles_to_us(p.finalize_cycle), p.finalize_cycle * 100.0 / total);
                 DEV_ALWAYS("  scope_end      : %.3fus", cycles_to_us(p.scope_end_cycle));
                 DEV_ALWAYS("  avg/task       : %.3fus", cycles_to_us(total) / p.submit_count);
-
-                PTO2TensorMapProfilingData tp = pto2_tensormap_get_profiling();
-                DEV_ALWAYS("=== TensorMap Lookup Stats ===");
-                DEV_ALWAYS("  lookups        : %llu, inserts: %llu",
-                    (unsigned long long)tp.lookup_count, (unsigned long long)tp.insert_count);
-                DEV_ALWAYS("  chain walked   : total=%llu, avg=%.1f, max=%d",
-                    (unsigned long long)tp.lookup_chain_total,
-                    tp.lookup_count > 0 ? (double)tp.lookup_chain_total / tp.lookup_count : 0.0,
-                    tp.lookup_chain_max);
-                DEV_ALWAYS("  overlap checks : %llu, hits=%llu (%.1f%%)",
-                    (unsigned long long)tp.overlap_checks, (unsigned long long)tp.overlap_hits,
-                    tp.overlap_checks > 0 ? tp.overlap_hits * 100.0 / tp.overlap_checks : 0.0);
             }
 #endif
 

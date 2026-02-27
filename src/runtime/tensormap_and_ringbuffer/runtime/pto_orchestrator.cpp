@@ -68,7 +68,7 @@ bool pto2_orchestrator_init(
     pto2_dep_pool_init(&orch->dep_pool, sm_handle->dep_list_pool, (int32_t)sm_handle->header->dep_list_pool_size);
 
     // Initialize TensorMap
-    if (!pto2_tensormap_init_default(&orch->tensor_map)) {
+    if (!orch->tensor_map.init_default()) {
         return false;
     }
     orch->tensor_map.orch = orch;
@@ -82,7 +82,7 @@ bool pto2_orchestrator_init(
     if (!orch->scope_tasks || !orch->scope_begins) {
         free(orch->scope_tasks);
         free(orch->scope_begins);
-        pto2_tensormap_destroy(&orch->tensor_map);
+        orch->tensor_map.destroy();
         return false;
     }
     orch->scope_tasks_size = 0;
@@ -97,7 +97,7 @@ bool pto2_orchestrator_init(
 }
 
 void pto2_orchestrator_destroy(PTO2OrchestratorState* orch) {
-    pto2_tensormap_destroy(&orch->tensor_map);
+    orch->tensor_map.destroy();
 
     free(orch->scope_tasks);
     orch->scope_tasks = NULL;
@@ -109,7 +109,7 @@ void pto2_orchestrator_reset(PTO2OrchestratorState* orch) {
     pto2_heap_ring_reset(&orch->heap_ring);
     pto2_task_ring_reset(&orch->task_ring);
     pto2_dep_pool_reset(&orch->dep_pool);
-    pto2_tensormap_reset(&orch->tensor_map);
+    orch->tensor_map.reset();
 
     orch->tensormap_last_cleanup = 0;
     orch->scope_stack_top = -1;
@@ -246,7 +246,7 @@ void pto2_submit_task(PTO2OrchestratorState* orch,
     CYCLE_COUNT_START();
 
     // === STEP 0: Sync TensorMap validity and optional cleanup ===
-    pto2_orchestrator_sync_tensormap(&orch->tensor_map);
+    orch->tensor_map.sync_tensormap();
 
     CYCLE_COUNT_LAP(g_orch_sync_cycle);
 
@@ -307,7 +307,7 @@ void pto2_submit_task(PTO2OrchestratorState* orch,
             case PTOParamType::INPUT: {
                 // Look up producer via TensorMap
                 PTO2LookupResult lookup_result;
-                pto2_tensormap_lookup(&orch->tensor_map, p.tensor, &lookup_result);
+                orch->tensor_map.lookup(p.tensor, &lookup_result);
 
                 for (int r = 0; r < lookup_result.count; r++) {
                     int32_t entry_idx = lookup_result.entries[r].entry_idx;
@@ -339,7 +339,7 @@ void pto2_submit_task(PTO2OrchestratorState* orch,
                         // 应将前面的tensor从tensor map中剔除。
                         // 但是最开始的tensor除外，因为必须建立和最开始的task的依赖关系以保证tensor生命周期的正确管理
                         if (!entry.with_alloc) {
-                            pto2_tensormap_remove_entry(orch->tensor_map, entry_idx);
+                            orch->tensor_map.remove_entry(entry_idx);
                         }
                     }
                 }
@@ -392,7 +392,7 @@ void pto2_submit_task(PTO2OrchestratorState* orch,
         if (p.type == PTOParamType::OUTPUT || p.type == PTOParamType::INOUT) {
             // Register in TensorMap: this tensor is produced by task_id
             // Use task's tensor_copies (which has the heap-allocated address for outputs)
-            pto2_tensormap_insert(&orch->tensor_map, p.tensor, task_id, p.type == PTOParamType::OUTPUT);
+            orch->tensor_map.insert(p.tensor, task_id, p.type == PTOParamType::OUTPUT);
         }
     }
 
@@ -482,7 +482,7 @@ void pto2_orchestrator_print_stats(PTO2OrchestratorState* orch) {
     printf("Task ring active:    %d\n", pto2_task_ring_active_count(&orch->task_ring));
     printf("Heap ring used:      %" PRIu64 " / %" PRIu64 "\n", orch->heap_ring.top, orch->heap_ring.size);
     printf("Dep pool used:       %d / %d\n", pto2_dep_pool_used(&orch->dep_pool), orch->dep_pool.capacity);
-    printf("TensorMap valid:     %d\n", pto2_tensormap_valid_count(&orch->tensor_map));
+    printf("TensorMap valid:     %d\n", orch->tensor_map.valid_count());
     printf("===============================\n");
 }
 
