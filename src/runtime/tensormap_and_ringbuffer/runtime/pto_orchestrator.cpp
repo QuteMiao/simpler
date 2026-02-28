@@ -229,7 +229,7 @@ void pto2_submit_task(PTO2OrchestratorState* orch,
 
     task->param_count = num_params;
     for (int i = 0; i < num_params; i++) {
-        task->params[i].type = params[i].type; 
+        task->params[i].type = params[i].type;
         if (params[i].type == PTOParamType::SCALAR) {
             task->params[i].scalar_value = params[i].scalar_value;
         } else {
@@ -339,30 +339,28 @@ void pto2_submit_task(PTO2OrchestratorState* orch,
         PTO2SchedulerState* sched = orch->scheduler;
         int32_t slot = sched->pto2_task_slot(task_id);
 
-        // Set sentinel state BEFORE building dependencies.
-        // This prevents premature dispatch: if a producer completes during
-        // the loop below, its on_task_complete → check_ready will attempt
-        // CAS(PENDING→READY) which fails on CONSUMED, so the task won't be
-        // dispatched until init_task finalizes it in Step 6.
-        __atomic_store_n(&sched->task_state[slot], PTO2_TASK_CONSUMED, __ATOMIC_RELEASE);
-
+        int32_t early_finished = 0;
+        task->fanin_count = fanin_count + 1; // +1 redundance for not being ready too early
         for (int i = 0; i < fanin_count; i++) {
             int32_t producer_task_id = fanin_temp[i];
             // Add this task to producer's fanout list (with spinlock)
             PTO2TaskDescriptor* producer = pto2_task_ring_get(&orch->task_ring, producer_task_id);
             pto2_fanout_lock(producer);
+            producer->fanout_head = pto2_dep_list_prepend(&orch->dep_pool, producer->fanout_head, task_id);
+            producer->fanout_count++;
+            // Normal path: prepend consumer to producer's fanout list
+            task->fanin_head = pto2_dep_list_prepend(&orch->dep_pool, task->fanin_head, producer_task_id);
+
             int32_t prod_slot = sched->pto2_task_slot(producer_task_id);
             int32_t prod_state = __atomic_load_n(&sched->task_state[prod_slot], __ATOMIC_ACQUIRE);
-
-            // Check if producer has already completed (early-return path)
-            if (prod_state < PTO2_TASK_COMPLETED) {
-                // Normal path: prepend consumer to producer's fanout list
-                producer->fanout_head = pto2_dep_list_prepend(&orch->dep_pool, producer->fanout_head, task_id);
-                producer->fanout_count++;
-                task->fanin_head = pto2_dep_list_prepend(&orch->dep_pool, task->fanin_head, producer_task_id);
-                task->fanin_count++;
+            if (prod_state == PTO2_TASK_COMPLETED) {
+                // Early return optimization: if producer already completed, we can skip adding dependency and directly decrement fanin_count
+                early_finished++;
             }
             pto2_fanout_unlock(producer);
+        }
+        if (early_finished > 0) {
+            __atomic_fetch_add(&sched->fanin_refcount[slot], early_finished, __ATOMIC_SEQ_CST);
         }
     }
 
