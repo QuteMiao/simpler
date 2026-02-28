@@ -123,20 +123,9 @@ struct PTO2TensorMap {
             debug_assert(res->bucket_index == -1);
             return res;
         }
-        if (next_entry_idx < pool_size) {
-            PTO2TensorMapEntry* res = &entry_pool[next_entry_idx++];
-            debug_assert(res->bucket_index == -1);
-            return res;
-        }
-
-        size_t wait_count = 0;
-        while (free_num == 0) {
-            sync_tensormap(true);
-            always_assert(wait_count++ <= 1000000000UL);
-        }
-        debug_assert(free_num > 0);
-        PTO2TensorMapEntry* res = free_entry_list[--free_num];
-        debug_assert(res->bucket_index != -1);
+        always_assert(next_entry_idx < pool_size);
+        PTO2TensorMapEntry* res = &entry_pool[next_entry_idx++];
+        debug_assert(res->bucket_index == -1);
         return res;
     }
 
@@ -402,5 +391,5 @@ struct PTO2TensorMap {
      * Called periodically to refresh the lazy invalidation threshold.
      * Also triggers cleanup if threshold has advanced significantly.
      */
-    void sync_tensormap(bool force = false);
+    void sync_tensormap();
 };

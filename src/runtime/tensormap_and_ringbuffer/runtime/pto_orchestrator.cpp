@@ -184,45 +184,6 @@ void pto2_scope_end(PTO2OrchestratorState* orch) {
 // =============================================================================
 // Task Submission
 // =============================================================================
-
-void pto2_add_consumer_to_producer(
-    PTO2OrchestratorState* orch, PTO2TaskDescriptor* producer, int32_t producer_id, int32_t consumer_id) {
-    // Acquire per-task spinlock
-    // This synchronizes with scheduler's on_task_complete_threadsafe
-    pto2_fanout_lock(producer);
-
-    // AICPU parallel mode: check if producer already completed before adding to fanout
-    if (orch->aicpu_task_completed) {
-        int32_t prod_slot = producer_id & orch->aicpu_window_mask;
-        if (__atomic_load_n(&orch->aicpu_task_completed[prod_slot], __ATOMIC_ACQUIRE) >= 2) {
-            // Producer already completed, directly increment consumer's refcount
-            int32_t cons_slot = consumer_id & orch->aicpu_window_mask;
-            __atomic_fetch_add(&orch->aicpu_fanin_refcount[cons_slot], 1, __ATOMIC_ACQ_REL);
-            pto2_fanout_unlock(producer);
-            return;
-        }
-    }
-
-    // Normal path: prepend consumer to producer's fanout list
-    producer->fanout_head = pto2_dep_list_prepend(&orch->dep_pool, producer->fanout_head, consumer_id);
-    producer->fanout_count++;
-
-    // Check if producer has already completed (scheduler mode)
-    if (orch->scheduler) {
-        PTO2SchedulerState* sched = orch->scheduler;
-        int32_t prod_slot = pto2_task_slot(sched, producer_id);
-        int32_t prod_state = __atomic_load_n(&sched->task_state[prod_slot], __ATOMIC_ACQUIRE);
-
-        if (prod_state >= PTO2_TASK_COMPLETED) {
-            int32_t cons_slot = pto2_task_slot(sched, consumer_id);
-            __atomic_fetch_add(&sched->fanin_refcount[cons_slot], 1, __ATOMIC_SEQ_CST);
-        }
-    }
-
-    // Release spinlock
-    pto2_fanout_unlock(producer);
-}
-
 void pto2_submit_task(PTO2OrchestratorState* orch,
     int32_t kernel_id,
     PTO2WorkerType worker_type,
@@ -236,7 +197,7 @@ void pto2_submit_task(PTO2OrchestratorState* orch,
     CYCLE_COUNT_LAP(g_orch_sync_cycle);
 
     // Submission without an open scope is illegal
-    assert(orch->scope_stack_top >= 0 && "Cannot submit task outside a scope");
+    always_assert(orch->scope_stack_top >= 0 && "Cannot submit task outside a scope");
 
     // === STEP 1: Allocate task slot from Task Ring (blocks until available) ===
     int32_t task_id = orch->task_ring.pto2_task_ring_alloc();
@@ -328,10 +289,6 @@ void pto2_submit_task(PTO2OrchestratorState* orch,
                         if (fanin_count < PTO2_MAX_INPUTS) {
                             fanin_temp[fanin_count++] = producer_task_id;
                         }
-
-                        // Add this task to producer's fanout list (with spinlock)
-                        PTO2TaskDescriptor* producer = pto2_task_ring_get(&orch->task_ring, producer_task_id);
-                        pto2_add_consumer_to_producer(orch, producer, producer_task_id, task_id);
                     }
                     if (p.type == PTOParamType::INOUT && overlap_status == OverlapStatus::COVERED) {
                         // inout因为会再次insert进tensor map，
@@ -378,38 +335,43 @@ void pto2_submit_task(PTO2OrchestratorState* orch,
 
     // === STEP 5: Finalize fanin list ===
     // First build the fanin list
-    for (int i = 0; i < fanin_count; i++) {
-        task->fanin_head = pto2_dep_list_prepend(&orch->dep_pool, task->fanin_head, fanin_temp[i]);
-    }
-    // Use SEQ_CST to pair with the scheduler's SEQ_CST fetch_add + load (IRIW on ARM)
-    __atomic_store_n(&task->fanin_count, fanin_count, __ATOMIC_SEQ_CST);
+    if (orch->scheduler) {
+        PTO2SchedulerState* sched = orch->scheduler;
+        int32_t slot = sched->pto2_task_slot(task_id);
 
-    CYCLE_COUNT_LAP(g_orch_fanin_cycle);
+        // Set sentinel state BEFORE building dependencies.
+        // This prevents premature dispatch: if a producer completes during
+        // the loop below, its on_task_complete → check_ready will attempt
+        // CAS(PENDING→READY) which fails on CONSUMED, so the task won't be
+        // dispatched until init_task finalizes it in Step 6.
+        __atomic_store_n(&sched->task_state[slot], PTO2_TASK_CONSUMED, __ATOMIC_RELEASE);
 
-    // === STEP 5b: Check if task is already ready (all producers completed via early-return) ===
-    // In AICPU parallel mode, early-return in pto2_add_consumer_to_producer may have
-    // already incremented aicpu_fanin_refcount for this task.  Now that fanin_count is
-    // finalized, check if the task is already satisfied and push it to the orchestrator
-    // ready queue so scheduler threads can pick it up without an O(N) scan.
-    if (orch->aicpu_fanin_refcount && fanin_count > 0) {
-        int32_t slot = task_id & orch->aicpu_window_mask;
-        int32_t refcount = __atomic_load_n(&orch->aicpu_fanin_refcount[slot], __ATOMIC_SEQ_CST);
-        if (refcount >= fanin_count) {
-            // All producers already completed — push to orch ready queue
-            int32_t tail = orch->orch_ready_tail;
-            int32_t capacity = PTO2OrchestratorState::ORCH_READY_QUEUE_SIZE;
-            int32_t head = __atomic_load_n(&orch->orch_ready_head, __ATOMIC_ACQUIRE);
-            if (((tail + 1) & (capacity - 1)) != (head & (capacity - 1))) {
-                orch->orch_ready_queue[tail & (capacity - 1)] = task_id;
-                __atomic_store_n(&orch->orch_ready_tail, tail + 1, __ATOMIC_RELEASE);
+        for (int i = 0; i < fanin_count; i++) {
+            int32_t producer_task_id = fanin_temp[i];
+            // Add this task to producer's fanout list (with spinlock)
+            PTO2TaskDescriptor* producer = pto2_task_ring_get(&orch->task_ring, producer_task_id);
+            pto2_fanout_lock(producer);
+            int32_t prod_slot = sched->pto2_task_slot(producer_task_id);
+            int32_t prod_state = __atomic_load_n(&sched->task_state[prod_slot], __ATOMIC_ACQUIRE);
+
+            // Check if producer has already completed (early-return path)
+            if (prod_state < PTO2_TASK_COMPLETED) {
+                // Normal path: prepend consumer to producer's fanout list
+                producer->fanout_head = pto2_dep_list_prepend(&orch->dep_pool, producer->fanout_head, task_id);
+                producer->fanout_count++;
+                task->fanin_head = pto2_dep_list_prepend(&orch->dep_pool, task->fanin_head, producer_task_id);
+                task->fanin_count++;
             }
+            pto2_fanout_unlock(producer);
         }
     }
+
+    CYCLE_COUNT_LAP(g_orch_fanin_cycle);
 
     // === STEP 6: Initialize task in scheduler ===
     // In multi-threaded mode, scheduler thread handles task initialization via polling
     if (orch->scheduler && orch->init_task_on_submit) {
-        pto2_scheduler_init_task(orch->scheduler, task_id, task);
+        orch->scheduler->init_task(task_id, task);
     }
 
     // === STEP 7: Update shared memory with current task index ===

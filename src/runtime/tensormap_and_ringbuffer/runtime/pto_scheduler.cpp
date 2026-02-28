@@ -41,6 +41,7 @@ bool pto2_ready_queue_init(PTO2ReadyQueue* queue, uint64_t capacity) {
     queue->tail = 0;
     queue->capacity = capacity;
     queue->count = 0;
+    queue->spinlock = 0;
 
     return true;
 }
@@ -59,26 +60,35 @@ void pto2_ready_queue_reset(PTO2ReadyQueue* queue) {
 }
 
 bool pto2_ready_queue_push(PTO2ReadyQueue* queue, int32_t task_id) {
-    if (pto2_ready_queue_full(queue)) {
-        return false;
+    while (__atomic_exchange_n(&queue->spinlock, 1, __ATOMIC_ACQUIRE)) {
+        PTO2_SPIN_PAUSE_LIGHT();
     }
-    
-    queue->task_ids[queue->tail] = task_id;
-    queue->tail = (queue->tail + 1) % queue->capacity;
-    queue->count++;
-    
-    return true;
+
+    bool result = false;
+    if (!pto2_ready_queue_full(queue)) {
+        queue->task_ids[queue->tail] = task_id;
+        queue->tail = (queue->tail + 1) % queue->capacity;
+        queue->count++;
+        result = true;
+    }
+
+    __atomic_store_n(&queue->spinlock, 0, __ATOMIC_RELEASE);
+    return result;
 }
 
 int32_t pto2_ready_queue_pop(PTO2ReadyQueue* queue) {
-    if (pto2_ready_queue_empty(queue)) {
-        return -1;
+    while (__atomic_exchange_n(&queue->spinlock, 1, __ATOMIC_ACQUIRE)) {
+        PTO2_SPIN_PAUSE_LIGHT();
     }
-    
-    int32_t task_id = queue->task_ids[queue->head];
-    queue->head = (queue->head + 1) % queue->capacity;
-    queue->count--;
-    
+
+    int32_t task_id = -1;
+    if (!pto2_ready_queue_empty(queue)) {
+        task_id = queue->task_ids[queue->head];
+        queue->head = (queue->head + 1) % queue->capacity;
+        queue->count--;
+    }
+
+    __atomic_store_n(&queue->spinlock, 0, __ATOMIC_RELEASE);
     return task_id;
 }
 
@@ -166,9 +176,9 @@ void pto2_scheduler_reset(PTO2SchedulerState* sched) {
     sched->last_task_alive = 0;
     sched->heap_tail = 0;
 
-    memset(sched->task_state, 0, PTO2_TASK_WINDOW_SIZE * sizeof(PTO2TaskState));
-    memset(sched->fanin_refcount, 0, PTO2_TASK_WINDOW_SIZE * sizeof(int32_t));
-    memset(sched->fanout_refcount, 0, PTO2_TASK_WINDOW_SIZE * sizeof(int32_t));
+    memset(sched->task_state, 0, sched->task_window_size * sizeof(PTO2TaskState));
+    memset(sched->fanin_refcount, 0, sched->task_window_size * sizeof(int32_t));
+    memset(sched->fanout_refcount, 0, sched->task_window_size * sizeof(int32_t));
     
     for (int i = 0; i < PTO2_NUM_WORKER_TYPES; i++) {
         pto2_ready_queue_reset(&sched->ready_queues[i]);
@@ -178,44 +188,27 @@ void pto2_scheduler_reset(PTO2SchedulerState* sched) {
     sched->tasks_consumed = 0;
 }
 
-// =============================================================================
-// Task State Management
-// =============================================================================
-
-void pto2_scheduler_init_task(PTO2SchedulerState* sched, int32_t task_id,
-                               PTO2TaskDescriptor* task) {
-    int32_t slot = pto2_task_slot(sched, task_id);
-    
-    // Initialize scheduler state for this task
-    sched->task_state[slot] = PTO2_TASK_PENDING;
-    sched->fanin_refcount[slot] = 0;
-    sched->fanout_refcount[slot] = 0;
-    
-    // Check if task is immediately ready (no dependencies)
-    if (task->fanin_count == 0) {
-        sched->task_state[slot] = PTO2_TASK_READY;
-        pto2_ready_queue_push(&sched->ready_queues[task->worker_type], task_id);
-    }
-}
-
 void pto2_scheduler_check_ready(PTO2SchedulerState* sched, int32_t task_id,
                                  PTO2TaskDescriptor* task) {
-    int32_t slot = pto2_task_slot(sched, task_id);
-    
-    // Only transition PENDING -> READY
-    if (sched->task_state[slot] != PTO2_TASK_PENDING) {
-        return;
-    }
-    
+    int32_t slot = sched->pto2_task_slot(task_id);
+
+    // Atomically read fanin_refcount (may be updated by multiple threads)
+    int32_t refcount = __atomic_load_n(&sched->fanin_refcount[slot], __ATOMIC_SEQ_CST);
+    int32_t fanin_count = __atomic_load_n(&task->fanin_count, __ATOMIC_SEQ_CST);
+
     // Check if all producers have completed
-    if (sched->fanin_refcount[slot] == task->fanin_count) {
-        sched->task_state[slot] = PTO2_TASK_READY;
-        pto2_ready_queue_push(&sched->ready_queues[task->worker_type], task_id);
+    if (refcount >= fanin_count) {
+        // CAS PENDING -> READY to prevent double-enqueue from concurrent threads
+        PTO2TaskState expected = PTO2_TASK_PENDING;
+        if (__atomic_compare_exchange_n(&sched->task_state[slot], &expected, PTO2_TASK_READY,
+                                         false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+            pto2_ready_queue_push(&sched->ready_queues[task->worker_type], task_id);
+        }
     }
 }
 
 void pto2_scheduler_mark_running(PTO2SchedulerState* sched, int32_t task_id) {
-    int32_t slot = pto2_task_slot(sched, task_id);
+    int32_t slot = sched->pto2_task_slot(task_id);
     sched->task_state[slot] = PTO2_TASK_RUNNING;
 }
 
@@ -237,7 +230,7 @@ int32_t pto2_scheduler_get_ready_task(PTO2SchedulerState* sched,
 static void check_and_handle_consumed(PTO2SchedulerState* sched, 
                                        int32_t task_id,
                                        PTO2TaskDescriptor* task) {
-    int32_t slot = pto2_task_slot(sched, task_id);
+    int32_t slot = sched->pto2_task_slot(task_id);
     
     // Read fanout_count (set by orchestrator, only grows)
     int32_t fanout_count = __atomic_load_n(&task->fanout_count, __ATOMIC_ACQUIRE);
@@ -273,49 +266,53 @@ static void check_and_handle_consumed(PTO2SchedulerState* sched,
 }
 
 void pto2_scheduler_on_task_complete(PTO2SchedulerState* sched, int32_t task_id) {
-    int32_t slot = pto2_task_slot(sched, task_id);
+    int32_t slot = sched->pto2_task_slot(task_id);
     PTO2TaskDescriptor* task = pto2_sm_get_task(sched->sm_handle, task_id);
-    
-    // Mark task as completed
-    sched->task_state[slot] = PTO2_TASK_COMPLETED;
-    sched->tasks_completed++;
-    
-    // === STEP 1: Update fanin_refcount of all consumers ===
-    // Read fanout_list and increment each consumer's fanin_refcount
+
+    // === STEP 1: Mark COMPLETED and snapshot fanout_head under lock ===
+    // Acquire fanout_lock to safely read fanout_head (orchestrator may be appending).
+    // Release lock EARLY: once COMPLETED is visible, orchestrator's Step 5 will
+    // skip this producer (prod_state >= COMPLETED), so no new entries can be
+    // appended to the fanout list. Traversal outside the lock is safe.
+    pto2_fanout_lock(task);
+    __atomic_store_n(&sched->task_state[slot], PTO2_TASK_COMPLETED, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&sched->tasks_completed, 1, __ATOMIC_RELAXED);
     int32_t fanout_head = PTO2_LOAD_ACQUIRE(&task->fanout_head);
+    pto2_fanout_unlock(task);
+
+    // Traverse fanout chain OUTSIDE the lock to avoid blocking orchestrator
     int32_t current = fanout_head;
-    
     while (current > 0) {
         PTO2DepListEntry* entry = pto2_dep_pool_get(sched->dep_pool, current);
         if (!entry) break;
-        
+
         int32_t consumer_id = entry->task_id;
-        int32_t consumer_slot = pto2_task_slot(sched, consumer_id);
         PTO2TaskDescriptor* consumer = pto2_sm_get_task(sched->sm_handle, consumer_id);
-        
-        // Increment consumer's fanin_refcount
-        sched->fanin_refcount[consumer_slot]++;
-        
-        // Check if consumer is now ready
+        int32_t consumer_slot = sched->pto2_task_slot(consumer_id);
+
+        // Atomically increment consumer's fanin_refcount (multiple threads may do this)
+        __atomic_fetch_add(&sched->fanin_refcount[consumer_slot], 1, __ATOMIC_SEQ_CST);
+
+        // Check if consumer is now ready (uses CAS internally to prevent double-enqueue)
         pto2_scheduler_check_ready(sched, consumer_id, consumer);
-        
+
         current = entry->next_offset;
     }
-    
+
     // === STEP 2: Update fanout_refcount of all producers ===
     // This task is a consumer of its fanin producers - release references
     current = task->fanin_head;
-    
+
     while (current > 0) {
         PTO2DepListEntry* entry = pto2_dep_pool_get(sched->dep_pool, current);
         if (!entry) break;
-        
+
         int32_t producer_id = entry->task_id;
         pto2_scheduler_release_producer(sched, producer_id);
-        
+
         current = entry->next_offset;
     }
-    
+
     // === STEP 3: Check if this task can transition to CONSUMED ===
     check_and_handle_consumed(sched, task_id, task);
 }
@@ -328,7 +325,7 @@ void pto2_scheduler_on_scope_end(PTO2SchedulerState* sched,
 }
 
 void pto2_scheduler_release_producer(PTO2SchedulerState* sched, int32_t producer_id) {
-    int32_t slot = pto2_task_slot(sched, producer_id);
+    int32_t slot = sched->pto2_task_slot(producer_id);
     PTO2TaskDescriptor* producer = pto2_sm_get_task(sched->sm_handle, producer_id);
     
     // Increment fanout_refcount atomically (called from both orchestrator and scheduler threads)
@@ -348,7 +345,7 @@ void pto2_scheduler_advance_ring_pointers(PTO2SchedulerState* sched) {
     
     // Advance last_task_alive while tasks at that position are CONSUMED
     while (sched->last_task_alive < current_task_index) {
-        int32_t slot = pto2_task_slot(sched, sched->last_task_alive);
+        int32_t slot = sched->pto2_task_slot(sched->last_task_alive);
         
         if (sched->task_state[slot] != PTO2_TASK_CONSUMED) {
             break;  // Found non-consumed task, stop advancing

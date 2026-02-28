@@ -221,17 +221,18 @@ int32_t PTO2TensorMap::valid_count() {
     return count;
 }
 
-void PTO2TensorMap::sync_tensormap(bool force) {
+void PTO2TensorMap::sync_tensormap() {
+    constexpr int MIN_FREE_NUM = 1024;
     always_assert(orch != nullptr);
-    // Read current last_task_alive from shared memory
-    int32_t new_last_task_alive = PTO2_LOAD_ACQUIRE(&orch->sm_handle->header->last_task_alive);
-
-    // Update TensorMap validity threshold
-    sync_validity(new_last_task_alive);
-
-    // Periodically cleanup TensorMap to remove stale entries from bucket chains
-    if (force || (new_last_task_alive - orch->tensormap_last_cleanup >= PTO2_TENSORMAP_CLEANUP_INTERVAL)) {
-        cleanup_retired(orch->tensormap_last_cleanup, new_last_task_alive);
-        orch->tensormap_last_cleanup = new_last_task_alive;
+    while(true) {
+        // Read current last_task_alive from shared memory
+        int32_t new_last_task_alive = PTO2_LOAD_ACQUIRE(&orch->sm_handle->header->last_task_alive);
+        sync_validity(new_last_task_alive);
+        if ((pool_size - next_entry_idx + free_num < MIN_FREE_NUM) || new_last_task_alive - orch->tensormap_last_cleanup >= PTO2_TENSORMAP_CLEANUP_INTERVAL) {
+            cleanup_retired(orch->tensormap_last_cleanup, new_last_task_alive);
+            orch->tensormap_last_cleanup = new_last_task_alive;
+        } else {
+            break;
+        }
     }
 }

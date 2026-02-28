@@ -36,7 +36,14 @@ typedef struct {
     uint64_t tail;        // Enqueue position
     uint64_t capacity;    // Queue capacity
     uint64_t count;       // Current number of tasks in queue
+    int32_t spinlock;     // Spinlock for thread-safe push/pop
 } PTO2ReadyQueue;
+
+/**
+ * Push task to ready queue
+ * @return true if successful, false if queue is full
+ */
+bool pto2_ready_queue_push(PTO2ReadyQueue* queue, int32_t task_id);
 
 // =============================================================================
 // Scheduler State
@@ -81,15 +88,68 @@ typedef struct PTO2SchedulerState {
     int64_t tasks_consumed;
     int64_t total_dispatch_cycles;
 
-} PTO2SchedulerState;
 
-/**
- * Calculate task slot from task_id
- * Uses runtime window_size instead of compile-time constant
- */
-static inline int32_t pto2_task_slot(PTO2SchedulerState* sched, int32_t task_id) {
-    return task_id & sched->task_window_mask;
-}
+
+    /**
+    * Calculate task slot from task_id
+    * Uses runtime window_size instead of compile-time constant
+    */
+    inline int32_t pto2_task_slot(int32_t task_id) {
+        return task_id & task_window_mask;
+    }
+
+    // =============================================================================
+    // Task State Management
+    // =============================================================================
+
+    /**
+     * Initialize task in scheduler (called when task is submitted)
+     *
+     * Sets task state to PENDING or READY based on fanin_count.
+     *
+     * @param sched   Scheduler state
+     * @param task_id Task ID
+     * @param task    Task descriptor (from shared memory)
+     */
+    void init_task(int32_t task_id, PTO2TaskDescriptor* task) {
+        int32_t slot = pto2_task_slot(task_id);
+
+        // Step A: Transition CONSUMED→PENDING for reused slots.
+        // First-use slots are already PENDING (0) from calloc.
+        // Fix 3 (sentinel in submit_task) guarantees first-use slots are also
+        // CONSUMED at this point. Use CAS to avoid stomping on a concurrent
+        // on_task_complete that may have already transitioned this slot to READY.
+        PTO2TaskState state = __atomic_load_n(&task_state[slot], __ATOMIC_ACQUIRE);
+        if (state == PTO2_TASK_CONSUMED) {
+            PTO2TaskState expected = PTO2_TASK_CONSUMED;
+            __atomic_compare_exchange_n(
+                &task_state[slot], &expected, PTO2_TASK_PENDING,
+                false, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+        }
+
+        // Step B: Reset fanout_refcount for new task lifecycle.
+        // Do NOT reset fanin_refcount — it may have been incremented by
+        // concurrent on_task_complete between Step 5 and Step 6.
+        fanout_refcount[slot] = 0;
+
+        // Step C: Check if task is immediately ready.
+        // Covers root tasks (fanin_count==0) and tasks where all deps
+        // already satisfied via concurrent completions.
+        state = __atomic_load_n(&task_state[slot], __ATOMIC_ACQUIRE);
+        if (state == PTO2_TASK_PENDING) {
+            int32_t fc = __atomic_load_n(&task->fanin_count, __ATOMIC_SEQ_CST);
+            int32_t refcount = __atomic_load_n(&fanin_refcount[slot], __ATOMIC_SEQ_CST);
+            if (refcount >= fc) {
+                // CAS PENDING→READY to prevent double-enqueue with concurrent on_task_complete
+                PTO2TaskState expected = PTO2_TASK_PENDING;
+                if (__atomic_compare_exchange_n(&task_state[slot], &expected, PTO2_TASK_READY,
+                        false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+                    pto2_ready_queue_push(&ready_queues[task->worker_type], task_id);
+                }
+            }
+        }
+    }
+} PTO2SchedulerState;
 
 // =============================================================================
 // Scheduler API
@@ -139,12 +199,6 @@ void pto2_ready_queue_destroy(PTO2ReadyQueue* queue);
 void pto2_ready_queue_reset(PTO2ReadyQueue* queue);
 
 /**
- * Push task to ready queue
- * @return true if successful, false if queue is full
- */
-bool pto2_ready_queue_push(PTO2ReadyQueue* queue, int32_t task_id);
-
-/**
  * Pop task from ready queue
  * @return task_id, or -1 if queue is empty
  */
@@ -174,18 +228,6 @@ static inline uint64_t pto2_ready_queue_count(PTO2ReadyQueue* queue) {
 // =============================================================================
 // Task State Management
 // =============================================================================
-
-/**
- * Initialize task in scheduler (called when task is submitted)
- *
- * Sets task state to PENDING or READY based on fanin_count.
- *
- * @param sched   Scheduler state
- * @param task_id Task ID
- * @param task    Task descriptor (from shared memory)
- */
-void pto2_scheduler_init_task(PTO2SchedulerState* sched, int32_t task_id,
-                               PTO2TaskDescriptor* task);
 
 /**
  * Check if task should transition to READY
