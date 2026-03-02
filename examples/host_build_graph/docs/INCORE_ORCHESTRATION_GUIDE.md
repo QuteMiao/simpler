@@ -17,7 +17,7 @@ int build_graph(Runtime* runtime, uint64_t* args, int arg_count);
 `Runtime` is defined in `src/runtime/host_build_graph/runtime/runtime.h`.
 
 ## Argument Layout
-When you use the default `golden.py` tensor flow (`TENSOR_ORDER`), the argument layout built by `examples/scripts/code_runner.py` is:
+When you use the default `golden.py` tensor argument order (`TENSOR_ORDER`), the argument layout built by `examples/scripts/code_runner.py` is:
 
 ```
 [ptr_0, ptr_1, ..., ptr_n, nbytes_0, nbytes_1, ..., nbytes_n, element_count]

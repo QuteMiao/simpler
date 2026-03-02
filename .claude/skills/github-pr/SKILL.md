@@ -177,3 +177,70 @@ gh pr create \
 - [ ] Hardware tests pass (if applicable)
 
 Fixes #ISSUE_NUMBER (if applicable)
+EOF
+)"
+```
+
+**Fork contributor** — PR from fork to upstream:
+
+```bash
+gh pr create \
+  --repo OWNER/REPO \
+  --base "$DEFAULT_BRANCH" \
+  --head "FORK_OWNER:$BRANCH_NAME" \
+  --title "Brief description" \
+  --body "$(cat <<'EOF'
+## Summary
+- Key change 1
+- Key change 2
+
+## Testing
+- [ ] Simulation tests pass
+- [ ] Hardware tests pass (if applicable)
+
+Fixes #ISSUE_NUMBER (if applicable)
+EOF
+)"
+```
+
+Extract `OWNER/REPO` from `upstream` URL, `FORK_OWNER` from `origin` URL.
+
+**PR title/body**: Auto-generate from commit messages. Keep the title under 72 characters.
+
+**Important**: Do NOT add AI co-author footers or branding.
+
+## Step 7: Post-Merge Cleanup (Repo Owner Only)
+
+After the PR is merged, the repo owner should delete the feature branch:
+
+```bash
+git checkout "$DEFAULT_BRANCH"
+git pull origin "$DEFAULT_BRANCH"
+git branch -d "$BRANCH_NAME"                   # Delete local branch
+git push origin --delete "$BRANCH_NAME"         # Delete remote branch
+```
+
+Fork contributors do not need remote cleanup — their fork branches are independent.
+
+## Common Issues
+
+| Issue | Solution |
+| ----- | -------- |
+| PR already exists | `gh pr view`, push if ahead, then exit |
+| Merge conflicts | Resolve, `git add`, `git rebase --continue` |
+| Push rejected | `git push --force-with-lease` |
+| gh not authenticated | Tell user to run `gh auth login` |
+| More than 1 commit | Squash with `git reset --soft` + re-commit |
+| Can't detect role | Check `git remote -v` output |
+
+## Checklist
+
+- [ ] Role detected (repo owner vs fork contributor)
+- [ ] Branch prepared (created from main if needed)
+- [ ] Changes committed via `/git-commit`
+- [ ] No existing PR for this branch
+- [ ] Rebased onto latest base ref
+- [ ] Exactly 1 commit ahead of base
+- [ ] Pushed to `origin` (never other remotes)
+- [ ] PR created with clear title and summary
+- [ ] (Repo owner) Feature branch deleted after merge
