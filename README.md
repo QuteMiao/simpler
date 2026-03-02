@@ -2,6 +2,18 @@
 
 Modular runtime for building and executing task dependency runtimes on Ascend devices with coordinated AICPU and AICore execution. Three independently compiled programs work together through clearly defined APIs.
 
+## Documentation
+
+For detailed information about the inner workings of specific runtime variants and orchestration mechanisms, refer to the following guides:
+
+- **Runtime Logic Guides** (internal execution mechanics):
+  - [Host Build Graph Runtime](src/runtime/host_build_graph/docs/RUNTIME_LOGIC.md)
+  - [AICPU Build Graph Runtime](src/runtime/aicpu_build_graph/docs/RUNTIME_LOGIC.md)
+  - [TensorMap & RingBuffer Runtime](src/runtime/tensormap_and_ringbuffer/docs/RUNTIME_LOGIC.md)
+- **Orchestration Guides** (developer guides for kernel coordination):
+  - [Host Build Graph Orchestration](examples/host_build_graph/docs/INCORE_ORCHESTRATION_GUIDE.md)
+  - [TensorMap & RingBuffer Orchestration](examples/tensormap_and_ringbuffer/docs/INCORE_ORCHESTRATION_GUIDE.md)
+
 ## Architecture Overview
 
 The PTO Runtime consists of **three separate programs** that communicate through well-defined APIs:
