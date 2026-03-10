@@ -1,0 +1,1206 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PTO2 依赖计数处理逻辑分析</title>
+    <style>
+        :root {
+            --bg-primary: #0f172a;
+            --bg-secondary: #1e293b;
+            --bg-card: #334155;
+            --text-primary: #f1f5f9;
+            --text-secondary: #94a3b8;
+            --accent-cyan: #22d3ee;
+            --accent-purple: #a78bfa;
+            --accent-green: #4ade80;
+            --accent-orange: #fb923c;
+            --accent-red: #f87171;
+            --accent-blue: #60a5fa;
+            --accent-yellow: #facc15;
+            --border-color: #475569;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.7;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        header {
+            text-align: center;
+            padding: 3rem 0;
+            border-bottom: 1px solid var(--border-color);
+            margin-bottom: 2rem;
+            background: linear-gradient(135deg, rgba(34, 211, 238, 0.1), rgba(167, 139, 250, 0.1));
+        }
+
+        h1 {
+            font-size: 2.2rem;
+            background: linear-gradient(135deg, var(--accent-cyan), var(--accent-purple));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 0.5rem;
+        }
+
+        .subtitle {
+            color: var(--text-secondary);
+            font-size: 1.1rem;
+        }
+
+        .section {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            border: 1px solid var(--border-color);
+        }
+
+        .section-title {
+            font-size: 1.3rem;
+            color: var(--accent-cyan);
+            margin-bottom: 1.2rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .section-title::before {
+            content: '';
+            display: inline-block;
+            width: 4px;
+            height: 1.2em;
+            background: var(--accent-cyan);
+            border-radius: 2px;
+        }
+
+        .data-structure {
+            background: var(--bg-card);
+            border-radius: 10px;
+            padding: 1.3rem;
+            margin: 1rem 0;
+            overflow-x: auto;
+        }
+
+        .struct-header {
+            display: flex;
+            align-items: center;
+            gap: 0.8rem;
+            margin-bottom: 1rem;
+            padding-bottom: 0.8rem;
+            border-bottom: 2px solid var(--border-color);
+        }
+
+        .struct-icon {
+            font-size: 1.5rem;
+        }
+
+        .struct-name {
+            font-family: 'Courier New', monospace;
+            color: var(--accent-purple);
+            font-weight: 700;
+            font-size: 1.1rem;
+        }
+
+        .struct-field {
+            display: flex;
+            gap: 1rem;
+            padding: 0.6rem 0;
+            border-bottom: 1px dashed var(--border-color);
+            font-size: 0.95rem;
+            align-items: center;
+        }
+
+        .struct-field:last-child {
+            border-bottom: none;
+        }
+
+        .field-name {
+            color: var(--accent-cyan);
+            font-family: 'Courier New', monospace;
+            min-width: 160px;
+            font-weight: 600;
+        }
+
+        .field-type {
+            color: var(--accent-orange);
+            font-family: 'Courier New', monospace;
+            min-width: 280px;
+        }
+
+        .field-desc {
+            color: var(--text-secondary);
+        }
+
+        .phase-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 1rem;
+            margin-top: 1rem;
+        }
+
+        .phase-card {
+            background: var(--bg-card);
+            border-radius: 10px;
+            padding: 1.2rem;
+            border: 1px solid var(--border-color);
+            transition: all 0.3s ease;
+        }
+
+        .phase-card:hover {
+            border-color: var(--accent-cyan);
+            transform: translateY(-2px);
+        }
+
+        .phase-card-header {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-bottom: 0.8rem;
+        }
+
+        .phase-id {
+            background: var(--accent-purple);
+            color: white;
+            padding: 0.25rem 0.6rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 700;
+        }
+
+        .phase-id.orch {
+            background: var(--accent-green);
+        }
+
+        .phase-id.sched {
+            background: var(--accent-blue);
+        }
+
+        .phase-name {
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .timeline {
+            position: relative;
+            padding-left: 2rem;
+            margin: 1.5rem 0;
+        }
+
+        .timeline::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 3px;
+            background: linear-gradient(to bottom, var(--accent-green), var(--accent-blue), var(--accent-purple), var(--accent-orange));
+            border-radius: 2px;
+        }
+
+        .timeline-item {
+            position: relative;
+            padding: 1rem 1.2rem;
+            margin-bottom: 1rem;
+            background: var(--bg-card);
+            border-radius: 10px;
+            margin-left: 1rem;
+        }
+
+        .timeline-item::before {
+            content: '';
+            position: absolute;
+            left: -2.15rem;
+            top: 1.3rem;
+            width: 14px;
+            height: 14px;
+            background: var(--accent-cyan);
+            border-radius: 50%;
+            border: 3px solid var(--bg-primary);
+        }
+
+        .timeline-item.orch::before {
+            background: var(--accent-green);
+        }
+
+        .timeline-item.sched::before {
+            background: var(--accent-blue);
+        }
+
+        .timeline-title {
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 0.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .timeline-content {
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+        }
+
+        .code-block {
+            background: var(--bg-primary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 1rem;
+            margin: 0.8rem 0;
+            overflow-x: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 0.85rem;
+            line-height: 1.5;
+            color: var(--accent-green);
+        }
+
+        .code-comment {
+            color: var(--text-secondary);
+        }
+
+        .code-keyword {
+            color: var(--accent-purple);
+        }
+
+        .code-string {
+            color: var(--accent-orange);
+        }
+
+        .code-number {
+            color: var(--accent-yellow);
+        }
+
+        .code-variable {
+            color: var(--accent-cyan);
+        }
+
+        .highlight-box {
+            background: linear-gradient(135deg, rgba(34, 211, 238, 0.1), rgba(167, 139, 250, 0.1));
+            border: 1px solid var(--accent-cyan);
+            border-radius: 10px;
+            padding: 1.3rem;
+            margin: 1.2rem 0;
+        }
+
+        .highlight-title {
+            font-weight: 600;
+            color: var(--accent-cyan);
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .key-point {
+            display: flex;
+            align-items: flex-start;
+            gap: 0.6rem;
+            margin-bottom: 0.6rem;
+        }
+
+        .key-icon {
+            color: var(--accent-green);
+            margin-top: 0.2rem;
+            font-size: 1rem;
+        }
+
+        .diagram {
+            background: var(--bg-card);
+            border-radius: 12px;
+            padding: 2rem;
+            margin: 1.5rem 0;
+            text-align: center;
+        }
+
+        .diagram-title {
+            color: var(--accent-purple);
+            font-weight: 600;
+            margin-bottom: 1.5rem;
+        }
+
+        .dep-graph {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .dep-row {
+            display: flex;
+            align-items: center;
+            gap: 1.5rem;
+        }
+
+        .task-node {
+            background: var(--bg-secondary);
+            border: 2px solid var(--accent-cyan);
+            border-radius: 8px;
+            padding: 0.8rem 1.2rem;
+            min-width: 120px;
+            text-align: center;
+        }
+
+        .task-node.producer {
+            border-color: var(--accent-green);
+        }
+
+        .task-node.consumer {
+            border-color: var(--accent-blue);
+        }
+
+        .task-node-label {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }
+
+        .task-node-id {
+            font-weight: 700;
+            font-size: 1.1rem;
+        }
+
+        .dep-edge {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 0.3rem;
+        }
+
+        .dep-arrow {
+            color: var(--accent-orange);
+            font-size: 1.5rem;
+        }
+
+        .dep-label {
+            font-size: 0.75rem;
+            color: var(--accent-yellow);
+            font-family: 'Courier New', monospace;
+        }
+
+        .counter-visual {
+            display: flex;
+            gap: 2rem;
+            justify-content: center;
+            flex-wrap: wrap;
+            margin: 1.5rem 0;
+        }
+
+        .counter-box {
+            background: var(--bg-card);
+            border-radius: 10px;
+            padding: 1.2rem;
+            text-align: center;
+            min-width: 160px;
+        }
+
+        .counter-header {
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+            margin-bottom: 0.5rem;
+        }
+
+        .counter-value {
+            font-size: 2rem;
+            font-weight: 700;
+            font-family: 'Courier New', monospace;
+        }
+
+        .counter-box.fanin .counter-value {
+            color: var(--accent-green);
+        }
+
+        .counter-box.fanout .counter-value {
+            color: var(--accent-blue);
+        }
+
+        .counter-desc {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            margin-top: 0.3rem;
+        }
+
+        .flow-container {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.3rem;
+            flex-wrap: wrap;
+            margin: 1rem 0;
+        }
+
+        .flow-step {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-width: 100px;
+        }
+
+        .flow-box {
+            background: var(--bg-card);
+            border: 2px solid var(--border-color);
+            border-radius: 8px;
+            padding: 0.6rem 0.8rem;
+            text-align: center;
+            min-width: 90px;
+        }
+
+        .flow-box:hover {
+            border-color: var(--accent-cyan);
+        }
+
+        .flow-step-num {
+            background: var(--accent-purple);
+            color: white;
+            width: 22px;
+            height: 22px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.75rem;
+            font-weight: 700;
+            margin: 0.4rem auto;
+        }
+
+        .flow-step-title {
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+
+        .flow-arrow {
+            color: var(--accent-cyan);
+            font-size: 1.3rem;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+        }
+
+        th, td {
+            padding: 0.8rem;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        th {
+            background: var(--bg-card);
+            color: var(--accent-cyan);
+            font-weight: 600;
+        }
+
+        tr:hover td {
+            background: var(--bg-card);
+        }
+
+        .tag {
+            display: inline-block;
+            padding: 0.2rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            margin-right: 0.3rem;
+        }
+
+        .tag-atomic {
+            background: rgba(167, 139, 250, 0.2);
+            color: var(--accent-purple);
+        }
+
+        .tag-lock {
+            background: rgba(251, 146, 60, 0.2);
+            color: var(--accent-orange);
+        }
+
+        .tag-sync {
+            background: rgba(34, 211, 238, 0.2);
+            color: var(--accent-cyan);
+        }
+
+        .tag-opt {
+            background: rgba(74, 222, 128, 0.2);
+            color: var(--accent-green);
+        }
+
+        .note-box {
+            background: rgba(251, 146, 60, 0.1);
+            border-left: 4px solid var(--accent-orange);
+            padding: 1rem;
+            margin: 1rem 0;
+            border-radius: 0 8px 8px 0;
+        }
+
+        .note-title {
+            color: var(--accent-orange);
+            font-weight: 600;
+            margin-bottom: 0.3rem;
+        }
+
+        footer {
+            text-align: center;
+            padding: 2rem;
+            color: var(--text-secondary);
+            border-top: 1px solid var(--border-color);
+            margin-top: 2rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>PTO2 依赖计数处理逻辑深度分析</h1>
+            <p class="subtitle">fanin_count、fanout_count、fanout_head、fanout_lock 完整解析</p>
+        </header>
+
+        <section class="section">
+            <h2 class="section-title">一、核心数据结构定义</h2>
+            
+            <div class="data-structure">
+                <div class="struct-header">
+                    <span class="struct-icon">📋</span>
+                    <span class="struct-name">PTO2TaskDescriptor</span>
+                </div>
+                <div class="struct-field">
+                    <span class="field-name">task_id</span>
+                    <span class="field-type">int32_t</span>
+                    <span class="field-desc">唯一任务标识符</span>
+                </div>
+                <div class="struct-field">
+                    <span class="field-name">kernel_id</span>
+                    <span class="field-type">int32_t</span>
+                    <span class="field-desc">InCore函数ID</span>
+                </div>
+                <div class="struct-field">
+                    <span class="field-name">worker_type</span>
+                    <span class="field-type">int32_t</span>
+                    <span class="field-desc">目标工作类型</span>
+                </div>
+                <div class="struct-field">
+                    <span class="field-name">fanin_count</span>
+                    <span class="field-type">int32_t</span>
+                    <span class="field-desc">⭐ 生产者依赖数量（静态，只读）</span>
+                </div>
+                <div class="struct-field">
+                    <span class="field-name">fanout_lock</span>
+                    <span class="field-type">std::atomic&lt;int32_t&gt;</span>
+                    <span class="field-desc">⭐ fanout链表自旋锁（0=未锁，1=已锁）</span>
+                </div>
+                <div class="struct-field">
+                    <span class="field-name">fanout_head</span>
+                    <span class="field-type">PTO2DepListEntry*</span>
+                    <span class="field-desc">⭐ 消费者链表头指针</span>
+                </div>
+                <div class="struct-field">
+                    <span class="field-name">fanout_count</span>
+                    <span class="field-type">int32_t</span>
+                    <span class="field-desc">⭐ 消费者引用计数（1=scope持有 + N=消费者）</span>
+                </div>
+                <div class="struct-field">
+                    <span class="field-name">packed_buffer_base</span>
+                    <span class="field-type">void*</span>
+                    <span class="field-desc">输出缓冲区起始地址</span>
+                </div>
+            </div>
+
+            <div class="data-structure">
+                <div class="struct-header">
+                    <span class="struct-icon">🔗</span>
+                    <span class="struct-name">PTO2DepListEntry（依赖链表节点）</span>
+                </div>
+                <div class="struct-field">
+                    <span class="field-name">task_id</span>
+                    <span class="field-type">int32_t</span>
+                    <span class="field-desc">消费者/依赖者的任务ID</span>
+                </div>
+                <div class="struct-field">
+                    <span class="field-name">next</span>
+                    <span class="field-type">PTO2DepListEntry*</span>
+                    <span class="field-desc">指向下一个依赖条目的指针</span>
+                </div>
+            </div>
+
+            <div class="data-structure">
+                <div class="struct-header">
+                    <span class="struct-icon">📦</span>
+                    <span class="struct-name">PTO2TaskPayload（任务负载，冷路径数据）</span>
+                </div>
+                <div class="struct-field">
+                    <span class="field-name">fanin_tasks[]</span>
+                    <span class="field-type">int32_t[PTO2_MAX_INPUTS]</span>
+                    <span class="field-desc">⭐ 生产者任务ID数组（用于fanin释放）</span>
+                </div>
+                <div class="struct-field">
+                    <span class="field-name">fanin_actual_count</span>
+                    <span class="field-type">int32_t</span>
+                    <span class="field-desc">⭐ 实际fanin数量（不含+1冗余）</span>
+                </div>
+            </div>
+
+            <div class="data-structure">
+                <div class="struct-header">
+                    <span class="struct-icon">📊</span>
+                    <span class="struct-name">Scheduler State（调度器状态数组）</span>
+                </div>
+                <div class="struct-field">
+                    <span class="field-name">fanin_refcount[]</span>
+                    <span class="field-type">std::atomic&lt;int32_t&gt;</span>
+                    <span class="field-desc">⭐ 已完成的生产者计数（动态）</span>
+                </div>
+                <div class="struct-field">
+                    <span class="field-name">fanout_refcount[]</span>
+                    <span class="field-type">std::atomic&lt;int32_t&gt;</span>
+                    <span class="field-desc">⭐ 已释放的消费者引用计数（动态）</span>
+                </div>
+            </div>
+        </section>
+
+        <section class="section">
+            <h2 class="section-title">二、fanin_count 与 fanin_refcount 的关系</h2>
+            
+            <div class="counter-visual">
+                <div class="counter-box fanin">
+                    <div class="counter-header">fanin_count（静态）</div>
+                    <div class="counter-value">3</div>
+                    <div class="counter-desc">任务需要3个生产者<br>（提交时确定）</div>
+                </div>
+                <div class="counter-box" style="background: var(--bg-card);">
+                    <div class="counter-header">VS</div>
+                    <div class="counter-value" style="color: var(--accent-cyan);">→</div>
+                    <div class="counter-desc">依赖满足判断</div>
+                </div>
+                <div class="counter-box fanin">
+                    <div class="counter-header">fanin_refcount（动态）</div>
+                    <div class="counter-value">3</div>
+                    <div class="counter-desc">已有3个生产者完成<br>（运行时递增）</div>
+                </div>
+            </div>
+
+            <div class="highlight-box">
+                <div class="highlight-title">🎯 核心判断条件</div>
+                <div class="code-block">
+<span class="code-comment">// 当 fanin_refcount == fanin_count 时，任务就绪</span>
+<span class="code-keyword">if</span> (new_refcount == task-&gt;fanin_count) {
+    ready_queues[task-&gt;worker_type].push(task_id);  <span class="code-comment">// 加入就绪队列</span>
+}
+                </div>
+            </div>
+
+            <h3 style="color: var(--accent-green); margin: 1.2rem 0 0.8rem;">fanin_count = fanin_count + 1 设计</h3>
+            <div class="note-box">
+                <div class="note-title">💡 为什么要 +1 冗余？</div>
+                <p style="color: var(--text-secondary);">
+                    在任务提交时，生产者可能已经完成（如链式依赖中前一个任务执行很快）。如果不加这个冗余，可能出现：
+                </p>
+                <ol style="color: var(--text-secondary); margin: 0.8rem 0; padding-left: 1.2rem;">
+                    <li>生产者已完成，但消费者还没加入fanout链表</li>
+                    <li>导致生产者永远收不到消费者的引用，fanout_refcount 无法达到 fanout_count</li>
+                    <li>缓冲区无法被正确释放</li>
+                </ol>
+                <p style="color: var(--text-secondary);">
+                    <strong>+1 冗余</strong> = 初始化时立即释放一个引用（相当于 scope 持有的引用），确保即使没有消费者加入链表，任务也能正确完成生命周期。
+                </p>
+            </div>
+
+            <div class="code-block">
+<span class="code-comment">// pto_orchestrator.cpp, 行 390-427</span>
+
+<span class="code-comment">// STEP 5: Fanout 构建 - 早期完成优化</span>
+<span class="code-keyword">int32_t</span> early_finished = 0;
+task.fanin_count = fanin_count + 1;  <span class="code-comment">// +1 冗余设计</span>
+payload-&gt;fanin_actual_count = fanin_count;  <span class="code-comment">// 实际数量（不含+1）</span>
+
+<span class="code-keyword">for</span> (<span class="code-keyword">int</span> i = 0; i &lt; fanin_count; i++) {
+    <span class="code-variable">PTO2TaskDescriptor</span>& producer = ...;
+    
+    pto2_fanout_lock(producer);  <span class="code-comment">// 获取生产者锁</span>
+    
+    <span class="code-keyword">int32_t</span> prod_state = sched-&gt;task_state[prod_slot].load(<span class="code-variable">acquire</span>);
+    <span class="code-keyword">if</span> (prod_state >= PTO2_TASK_COMPLETED) {
+        <span class="code-comment">// 早期完成优化：生产者已完工，直接减少依赖计数</span>
+        early_finished++;
+    } <span class="code-keyword">else</span> {
+        <span class="code-comment">// 正常路径：加入fanout链表</span>
+        producer.fanout_head = orch-&gt;dep_pool_cur_entry;
+    }
+    
+    producer.fanout_count += 1;  <span class="code-comment">// 增加生产者引用</span>
+    pto2_fanout_unlock(producer);
+}
+
+<span class="code-comment">// 批量初始化：合并早期完成 + scope持有的+1 引用</span>
+<span class="code-keyword">int32_t</span> initial_refcount = early_finished + 1;
+<span class="code-keyword">int32_t</span> new_rc = sched-&gt;fanin_refcount[slot].fetch_add(initial_refcount, <span class="code-variable">acq_rel</span>)
+                 + initial_refcount;
+
+<span class="code-comment">// 检查是否就绪（fanin_count 包含 +1）</span>
+<span class="code-keyword">if</span> (new_rc >= fanin_count + 1) {
+    sched-&gt;ready_queues[task.worker_type].push(task_id);
+}
+            </div>
+        </section>
+
+        <section class="section">
+            <h2 class="section-title">三、fanout_count 与 fanout_refcount 的关系</h2>
+            
+            <div class="counter-visual">
+                <div class="counter-box fanout">
+                    <div class="counter-header">fanout_count（静态）</div>
+                    <div class="counter-value">3</div>
+                    <div class="counter-desc">需要3个消费者释放<br>（1个scope + 2个消费者）</div>
+                </div>
+                <div class="counter-box" style="background: var(--bg-card);">
+                    <div class="counter-header">VS</div>
+                    <div class="counter-value" style="color: var(--accent-cyan);">→</div>
+                    <div class="counter-desc">缓冲区释放判断</div>
+                </div>
+                <div class="counter-box fanout">
+                    <div class="counter-header">fanout_refcount（动态）</div>
+                    <div class="counter-value">3</div>
+                    <div class="counter-desc">已有3个消费者释放<br>（运行时递增）</div>
+                </div>
+            </div>
+
+            <div class="highlight-box">
+                <div class="highlight-title">🎯 核心判断条件</div>
+                <div class="code-block">
+<span class="code-comment">// 当 fanout_refcount == fanout_count 时，缓冲区可释放</span>
+<span class="code-keyword">if</span> (fanout_refcount[slot].load(<span class="code-variable">acquire</span>) != task.fanout_count) <span class="code-keyword">return</span>;
+
+<span class="code-comment">// 尝试将任务状态从 COMPLETED 改为 CONSUMED</span>
+task_state[slot].compare_exchange_strong(expected, PTO2_TASK_CONSUMED, <span class="code-variable">acq_rel</span>, <span class="code-variable">acquire</span>);
+                </div>
+            </div>
+
+            <h3 style="color: var(--accent-green); margin: 1.2rem 0 0.8rem;">fanout_count 初始值 = 1</h3>
+            <p style="color: var(--text-secondary); margin-bottom: 1rem;">
+                每个任务的 fanout_count 初始化为 <strong>1</strong>，这代表 <span class="tag tag-sync">scope 持有的引用</span>：
+            </p>
+            <div class="code-block">
+<span class="code-comment">// pto_orchestrator.cpp, 行 248-249</span>
+
+<span class="code-comment">// 初始化任务描述符</span>
+task.fanin_count = 0;
+task.fanout_head = <span class="code-keyword">nullptr</span>;
+task.fanout_lock.store(0, <span class="code-variable">relaxed</span>);
+
+<span class="code-comment">// Initial fanout_count = 1 (the owning scope holds one reference)</span>
+<span class="code-comment">// 初始化 fanout_count = 1，表示创建这个任务的 scope 持有1个引用</span>
+task.fanout_count = 1;
+            </div>
+        </section>
+
+        <section class="section">
+            <h2 class="section-title">四、Scope 生命周期管理</h2>
+            
+            <p style="color: var(--text-secondary); margin-bottom: 1rem;">
+                Scope 用于批量管理任务的生命周期。当 scope结束时，scope 持有的所有任务引用被释放：
+            </p>
+
+            <div class="diagram">
+                <div class="diagram-title">Scope 生命周期流程</div>
+                <div class="flow-container">
+                    <div class="flow-step">
+                        <div class="flow-box" style="border-color: var(--accent-green);">
+                            <div class="flow-step-num" style="background: var(--accent-green);">1</div>
+                            <div class="flow-step-title">pto2_scope_begin</div>
+                        </div>
+                    </div>
+                    <div class="flow-arrow">→</div>
+                    <div class="flow-step">
+                        <div class="flow-box">
+                            <div class="flow-step-num">2</div>
+                            <div class="flow-step-title">提交多个任务</div>
+                        </div>
+                    </div>
+                    <div class="flow-arrow">→</div>
+                    <div class="flow-step">
+                        <div class="flow-box">
+                            <div class="flow-step-num">3</div>
+                            <div class="flow-step-title">任务执行</div>
+                        </div>
+                    </div>
+                    <div class="flow-arrow">→</div>
+                    <div class="flow-step">
+                        <div class="flow-box" style="border-color: var(--accent-orange);">
+                            <div class="flow-step-num" style="background: var(--accent-orange);">4</div>
+                            <div class="flow-step-title">pto2_scope_end</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="code-block">
+<span class="code-comment">// pto_orchestrator.cpp, 行 194-216</span>
+
+<span class="code-keyword">void</span> <span class="code-variable">pto2_scope_end</span>(PTO2OrchestratorState* orch) {
+    <span class="code-comment">// 1. 获取当前scope的任务范围</span>
+    <span class="code-keyword">int32_t</span> begin = orch-&gt;scope_begins[orch-&gt;scope_stack_top--];
+    <span class="code-keyword">int32_t</span> count = orch-&gt;scope_tasks_size - begin;
+
+    <span class="code-comment">// 2. 通知调度器释放scope持有的引用</span>
+    <span class="code-keyword">if</span> (orch-&gt;scheduler && count > 0) {
+        orch-&gt;scheduler-&gt;on_scope_end(&orch-&gt;scope_tasks[begin], count);
+    }
+    
+    <span class="code-comment">// 3. 回滚scope任务缓冲区</span>
+    orch-&gt;scope_tasks_size = begin;
+}
+            </div>
+
+            <div class="code-block">
+<span class="code-comment">// pto_scheduler.h, 行 463-474</span>
+
+<span class="code-keyword">void</span> <span class="code-variable">on_scope_end</span>(<span class="code-keyword">const</span> int32_t* task_ids, <span class="code-keyword">int32_t</span> count) {
+    <span class="code-comment">// 遍历scope中的所有任务，释放每个任务的引用</span>
+    <span class="code-keyword">for</span> (<span class="code-keyword">int32_t</span> i = 0; i < count; i++) {
+        release_producer(task_ids[i]);  <span class="code-comment">// fanout_refcount += 1</span>
+    }
+}
+            </div>
+        </section>
+
+        <section class="section">
+            <h2 class="section-title">五、fanout_lock 自旋锁机制</h2>
+            
+            <p style="color: var(--text-secondary); margin-bottom: 1rem;">
+                fanout_lock 用于保护 fanout_head 和 fanout_count 的并发访问。因为调度器可能在任务完成时遍历fanout链表，而orchestrator可能在提交新消费者时修改同一个链表。
+            </p>
+
+            <div class="highlight-box">
+                <div class="highlight-title">🔒 锁的作用域</div>
+                <div class="key-point">
+                    <span class="key-icon">✓</span>
+                    <span><strong>写入时加锁</strong>：orchestrator 添加消费者到 fanout 链表时</span>
+                </div>
+                <div class="key-point">
+                    <span class="key-icon">✓</span>
+                    <span><strong>读取时加锁</strong>：scheduler 遍历 fanout 链表时</span>
+                </div>
+            </div>
+
+            <div class="code-block">
+<span class="code-comment">// pto_runtime2_types.h, 行 410-425</span>
+
+<span class="code-comment">// 加锁实现：TAS (Test-And-Set) 自旋锁</span>
+<span class="code-keyword">static</span> <span class="code-keyword">inline</span> <span class="code-keyword">void</span> <span class="code-variable">pto2_fanout_lock</span>(PTO2TaskDescriptor& task) {
+    <span class="code-keyword">for</span> (;;) {
+        <span class="code-comment">// 1. 轮询检查锁是否被释放</span>
+        <span class="code-keyword">while</span> (task.fanout_lock.load(<span class="code-variable">acquire</span>) != 0) {
+            SPIN_WAIT_HINT();  <span class="code-comment">// CPU让出等待</span>
+        }
+        
+        <span class="code-comment">// 2. 尝试CAS获取锁</span>
+        <span class="code-keyword">int32_t</span> expected = 0;
+        <span class="code-keyword">if</span> (task.fanout_lock.compare_exchange_weak(expected, 1,
+                                        <span class="code-variable">acquire</span>, <span class="code-variable">relaxed</span>)) {
+            <span class="code-keyword">return</span>;  <span class="code-comment">// 获取锁成功</span>
+        }
+        <span class="code-comment">// 3. CAS失败，继续轮询</span>
+    }
+}
+
+<span class="code-comment">// 解锁实现</span>
+<span class="code-keyword">static</span> <span class="code-keyword">inline</span> <span class="code-keyword">void</span> <span class="code-variable">pto2_fanout_unlock</span>(PTO2TaskDescriptor& task) {
+    task.fanout_lock.store(0, <span class="code-variable">release</span>);  <span class="code-comment">// 释放锁</span>
+}
+            </div>
+
+            <h3 style="color: var(--accent-orange); margin: 1.2rem 0 0.8rem;">⚠️ 关键：锁内操作必须轻量</h3>
+            <div class="note-box">
+                <div class="note-title">设计原则</div>
+                <p style="color: var(--text-secondary);">
+                    fanout_lock 是任务级别的细粒度锁。在锁内只能执行：
+                </p>
+                <ul style="color: var(--text-secondary); margin: 0.5rem 0; padding-left: 1.2rem;">
+                    <li>fanout_head 指针的读取/写入</li>
+                    <li>fanout_count 的增减</li>
+                    <li>DepListEntry 节点的插入</li>
+                </ul>
+                <p style="color: var(--text-secondary);">
+                    <strong>禁止</strong>在锁内执行可能导致阻塞的操作（如内存分配、系统调用）。
+                </p>
+            </div>
+        </section>
+
+        <section class="section">
+            <h2 class="section-title">六、fanout_head 链表构建与遍历</h2>
+            
+            <div class="diagram">
+                <div class="diagram-title">依赖链表结构</div>
+                <div class="dep-graph">
+                    <div class="dep-row">
+                        <div class="task-node producer">
+                            <div class="task-node-label">生产者 Task A</div>
+                            <div class="task-node-id" style="color: var(--accent-green);">ID: 10</div>
+                        </div>
+                    </div>
+                    <div class="dep-edge">
+                        <span class="dep-arrow">↓</span>
+                        <span class="dep-label">fanout_head</span>
+                    </div>
+                    <div class="dep-row">
+                        <div class="dep-edge">
+                            <div class="task-node consumer">
+                                <div class="task-node-id" style="color: var(--accent-blue);">ID: 15</div>
+                                <div class="task-node-label">消费者B</div>
+                            </div>
+                            <span style="color: var(--text-secondary);">→</span>
+                            <div class="task-node consumer">
+                                <div class="task-node-id" style="color: var(--accent-blue);">ID: 18</div>
+                                <div class="task-node-label">消费者C</div>
+                            </div>
+                            <span style="color: var(--text-secondary);">→</span>
+                            <div class="task-node consumer">
+                                <div class="task-node-id" style="color: var(--accent-blue);">ID: 22</div>
+                                <div class="task-node-label">消费者D</div>
+                            </div>
+                            <span style="color: var(--text-secondary);">→</span>
+                            <span style="color: var(--accent-orange);">nullptr</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <h3 style="color: var(--accent-green); margin: 1rem 0 0.8rem;">Orchestrator：构建 fanout 链表</h3>
+            <div class="code-block">
+<span class="code-comment">// pto_orchestrator.cpp, 行 395-420</span>
+
+<span class="code-keyword">for</span> (<span class="code-keyword">int</span> i = 0; i &lt; fanin_count; i++) {
+    <span class="code-keyword">int32_t</span> producer_task_id = fanin_temp[i];
+    <span class="code-variable">PTO2TaskDescriptor</span>& producer = ...;
+    
+    <span class="code-comment">// 1. 准备新节点</span>
+    orch-&gt;dep_pool_cur_entry-&gt;task_id = task_id;  <span class="code-comment">// 当前消费者</span>
+    orch-&gt;dep_pool_cur_entry-&gt;next = producer.fanout_head;  <span class="code-comment">// 头插法</span>
+    
+    <span class="code-comment">// 2. 加锁保护</span>
+    pto2_fanout_lock(producer);
+    
+    <span class="code-comment">// 3. 更新生产者状态</span>
+    producer.fanout_count += 1;  <span class="code-comment">// 增加引用计数</span>
+    
+    <span class="code-keyword">int32_t</span> prod_state = sched-&gt;task_state[prod_slot].load(<span class="code-variable">acquire</span>);
+    <span class="code-keyword">if</span> (prod_state >= PTO2_TASK_COMPLETED) {
+        <span class="code-comment">// 早期完成：不加入链表，直接计数</span>
+        early_finished++;
+    } <span class="code-keyword">else</span> {
+        <span class="code-comment">// 正常路径：头插到fanout链表</span>
+        producer.fanout_head = orch-&gt;dep_pool_cur_entry;
+    }
+    
+    <span class="code-comment">// 4. 解锁</span>
+    pto2_fanout_unlock(producer);
+}
+            </div>
+
+            <h3 style="color: var(--accent-blue); margin: 1rem 0 0.8rem;">Scheduler：遍历 fanout 链表通知消费者</h3>
+            <div class="code-block">
+<span class="code-comment">// pto_scheduler.h, 行 503-544</span>
+
+<span class="code-comment">// 1. 加锁并获取链表头指针</span>
+pto2_fanout_lock(task);
+task_state[slot].store(PTO2_TASK_COMPLETED, <span class="code-variable">release</span>);
+<span class="code-variable">PTO2DepListEntry</span>* current = task.fanout_head;  <span class="code-comment">// 在锁内读取</span>
+pto2_fanout_unlock(task);  <span class="code-comment">// 立即解锁，允许并发写入</span>
+
+<span class="code-comment">// 2. 遍历fanout链表，通知所有消费者</span>
+<span class="code-keyword">while</span> (current != <span class="code-keyword">nullptr</span>) {
+    <span class="code-keyword">int32_t</span> consumer_id = current-&gt;task_id;
+    <span class="code-variable">PTO2TaskDescriptor</span>* consumer = pto2_sm_get_task(consumer_id);
+    
+    <span class="code-comment">// 3. 释放生产者引用并检查消费者是否就绪</span>
+    release_fanin_and_check_ready(consumer_id, consumer);
+    
+    current = current-&gt;next;
+}
+            </div>
+        </section>
+
+        <section class="section">
+            <h2 class="section-title">七、完整生命周期示例</h2>
+            
+            <div class="timeline">
+                <div class="timeline-item orch">
+                    <div class="timeline-title">
+                        <span class="tag tag-atomic">STEP 1</span> 
+                        任务提交 (pto2_submit_task)
+                    </div>
+                    <div class="timeline-content">
+                        <ul style="margin: 0.5rem 0; padding-left: 1.2rem; color: var(--text-secondary);">
+                            <li>fanout_count = 1（scope持有）</li>
+                            <li>fanout_head = nullptr</li>
+                            <li>fanin_count = 依赖数量 + 1</li>
+                            <li>fanin_refcount = 0</li>
+                        </ul>
+                    </div>
+                </div>
+
+                <div class="timeline-item orch">
+                    <div class="timeline-title">
+                        <span class="tag tag-atomic">STEP 2</span> 
+                        后续消费者提交
+                    </div>
+                    <div class="timeline-content">
+                        <ul style="margin: 0.5rem 0; padding-left: 1.2rem; color: var(--text-secondary);">
+                            <li>获取 producer.fanout_lock</li>
+                            <li>fanout_count += 1</li>
+                            <li>fanout_head = 新节点（头插）</li>
+                            <li>释放 fanout_lock</li>
+                        </ul>
+                    </div>
+                </div>
+
+                <div class="timeline-item sched">
+                    <div class="timeline-title">
+                        <span class="tag tag-sync">STEP 3</span> 
+                        任务完成 (on_task_complete)
+                    </div>
+                    <div class="timeline-content">
+                        <ul style="margin: 0.5rem 0; padding-left: 1.2rem; color: var(--text-secondary);">
+                            <li>task_state → COMPLETED</li>
+                            <li>获取 fanout_lock</li>
+                            <li>读取 fanout_head</li>
+                            <li>释放 fanout_lock</li>
+                            <li>遍历fanout链表，调用 release_fanin_and_check_ready</li>
+                        </ul>
+                    </div>
+                </div>
+
+                <div class="timeline-item sched">
+                    <div class="timeline-title">
+                        <span class="tag tag-atomic">STEP 4</span> 
+                        消费者引用释放 (release_producer)
+                    </div>
+                    <div class="timeline-content">
+                        <ul style="margin: 0.5rem 0; padding-left: 1.2rem; color: var(--text-secondary);">
+                            <li>fanout_refcount += 1（原子操作）</li>
+                            <li>检查 fanout_refcount == fanout_count</li>
+                            <li>如果相等，task_state → CONSUMED</li>
+                            <li>尝试推进 ring pointer（释放缓冲区）</li>
+                        </ul>
+                    </div>
+                </div>
+
+                <div class="timeline-item sched">
+                    <div class="timeline-title">
+                        <span class="tag tag-opt">STEP 5</span> 
+                        Scope 结束 (pto2_scope_end)
+                    </div>
+                    <div class="timeline-content">
+                        <ul style="margin: 0.5rem 0; padding-left: 1.2rem; color: var(--text-secondary);">
+                            <li>遍历 scope 中的所有任务</li>
+                            <li>对每个任务调用 release_producer</li>
+                            <li>fanout_refcount += 1（释放scope持有的引用）</li>
+                            <li>触发 CONSUMED 状态转换（如果有消费者）</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="section">
+            <h2 class="section-title">八、总结表格</h2>
+            
+            <table>
+                <thead>
+                    <tr>
+                        <th>字段</th>
+                        <th>类型</th>
+                        <th>初始化位置</th>
+                        <th>修改位置</th>
+                        <th>用途</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><code style="color: var(--accent-green);">fanin_count</code></td>
+                        <td>int32_t（静态）</td>
+                        <td>pto2_submit_task</td>
+                        <td>无（只读）</td>
+                        <td>记录任务依赖的生产者数量</td>
+                    </tr>
+                    <tr>
+                        <td><code style="color: var(--accent-blue);">fanin_refcount</code></td>
+                        <td>atomic&lt;int32&gt;</td>
+                        <td>0</td>
+                        <td>release_producer / fetch_add</td>
+                        <td>已完成的依赖计数，=fanin_count时就绪</td>
+                    </tr>
+                    <tr>
+                        <td><code style="color: var(--accent-green);">fanout_count</code></td>
+                        <td>int32_t（静态）</td>
+                        <td>pto2_submit_task (=1)</td>
+                        <td>pto2_submit_task (+=消费者)</td>
+                        <td>需要的消费者释放计数</td>
+                    </tr>
+                    <tr>
+                        <td><code style="color: var(--accent-blue);">fanout_refcount</code></td>
+                        <td>atomic&lt;int32&gt;</td>
+                        <td>0</td>
+                        <td>release_producer / fetch_add</td>
+                        <td>已释放的消费者引用 =fanout_count时释放缓冲区</td>
+                    </tr>
+                    <tr>
+                        <td><code style="color: var(--accent-purple);">fanout_head</code></td>
+                        <td>PTO2DepListEntry*</td>
+                        <td>nullptr</td>
+                        <td>pto2_submit_task（头插）</td>
+                        <td>消费者链表头指针</td>
+                    </tr>
+                    <tr>
+                        <td><code style="color: var(--accent-orange);">fanout_lock</code></td>
+                        <td>atomic&lt;int32&gt;</td>
+                        <td>0</td>
+                        <td>CAS (0→1) / store(0)</td>
+                        <td>fanout链表并发访问保护</td>
+                    </tr>
+                </tbody>
+            </table>
+
+            <div class="highlight-box" style="margin-top: 1.5rem;">
+                <div class="highlight-title">🎯 关键设计要点</div>
+                <div class="key-point">
+                    <span class="key-icon">1</span>
+                    <span><strong>+1 冗余设计</strong>：fanin_count = 实际依赖 + 1，避免早期完成导致的引用泄漏</span>
+                </div>
+                <div class="key-point">
+                    <span class="key-icon">2</span>
+                    <span><strong>早期完成优化</strong>：生产者已完成时，直接增加计数而不加入fanout链表</span>
+                </div>
+                <div class="key-point">
+                    <span class="key-icon">3</span>
+                    <span><strong>Scope 持有引用</strong>：每个任务的 fanout_count 初始为 1，表示创建它的 scope 持有引用</span>
+                </div>
+                <div class="key-point">
+                    <span class="key-icon">4</span>
+                    <span><strong>细粒度锁</strong>：fanout_lock 只保护 fanout_head/fanout_count 的访问，遍历时先复制指针再解锁</span>
+                </div>
+                <div class="key-point">
+                    <span class="key-icon">5</span>
+                    <span><strong>冷热分离</strong>：fanin_tasks 放在 TaskPayload（冷路径），减少 TaskDescriptor（热路径）大小</span>
+                </div>
+            </div>
+        </section>
+
+    </div>
+
+    <footer>
+        <p>PTO2 依赖计数处理逻辑分析 | 生成于 2024</p>
+    </footer>
+</body>
+</html>

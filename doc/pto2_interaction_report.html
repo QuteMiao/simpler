@@ -1,0 +1,1186 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PTO2 任务提交与调度交互分析报告</title>
+    <style>
+        :root {
+            --bg-primary: #0f172a;
+            --bg-secondary: #1e293b;
+            --bg-card: #334155;
+            --text-primary: #f1f5f9;
+            --text-secondary: #94a3b8;
+            --accent-cyan: #22d3ee;
+            --accent-purple: #a78bfa;
+            --accent-green: #4ade80;
+            --accent-orange: #fb923c;
+            --accent-red: #f87171;
+            --accent-blue: #60a5fa;
+            --border-color: #475569;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.6;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        header {
+            text-align: center;
+            padding: 3rem 0;
+            border-bottom: 1px solid var(--border-color);
+            margin-bottom: 2rem;
+        }
+
+        h1 {
+            font-size: 2.5rem;
+            background: linear-gradient(135deg, var(--accent-cyan), var(--accent-purple));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 1rem;
+        }
+
+        .subtitle {
+            color: var(--text-secondary);
+            font-size: 1.1rem;
+        }
+
+        .section {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            border: 1px solid var(--border-color);
+        }
+
+        .section-title {
+            font-size: 1.4rem;
+            color: var(--accent-cyan);
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .section-title::before {
+            content: '';
+            display: inline-block;
+            width: 4px;
+            height: 1.2em;
+            background: var(--accent-cyan);
+            border-radius: 2px;
+        }
+
+        .function-box {
+            background: var(--bg-card);
+            border-radius: 8px;
+            padding: 1.2rem;
+            margin-bottom: 1rem;
+            border-left: 4px solid var(--accent-purple);
+        }
+
+        .function-box.orchestrator {
+            border-left-color: var(--accent-green);
+        }
+
+        .function-box.scheduler {
+            border-left-color: var(--accent-blue);
+        }
+
+        .function-name {
+            font-size: 1.2rem;
+            font-weight: 600;
+            color: var(--accent-green);
+            margin-bottom: 0.5rem;
+        }
+
+        .function-name.scheduler-fn {
+            color: var(--accent-blue);
+        }
+
+        .function-location {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            margin-bottom: 0.8rem;
+        }
+
+        .flow-diagram {
+            background: var(--bg-card);
+            border-radius: 12px;
+            padding: 2rem;
+            margin: 1.5rem 0;
+            overflow-x: auto;
+        }
+
+        .flow-container {
+            display: flex;
+            align-items: flex-start;
+            justify-content: center;
+            gap: 0.5rem;
+            min-width: max-content;
+            padding: 1rem 0;
+        }
+
+        .flow-step {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-width: 140px;
+        }
+
+        .step-box {
+            background: var(--bg-secondary);
+            border: 2px solid var(--border-color);
+            border-radius: 8px;
+            padding: 0.8rem 1rem;
+            text-align: center;
+            min-width: 130px;
+            transition: all 0.3s ease;
+        }
+
+        .step-box:hover {
+            transform: translateY(-3px);
+            border-color: var(--accent-cyan);
+            box-shadow: 0 4px 20px rgba(34, 211, 238, 0.2);
+        }
+
+        .step-number {
+            background: var(--accent-purple);
+            color: white;
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.8rem;
+            font-weight: bold;
+            margin: 0 auto 0.5rem;
+        }
+
+        .step-title {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .step-desc {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            margin-top: 0.3rem;
+        }
+
+        .arrow {
+            color: var(--accent-cyan);
+            font-size: 1.5rem;
+            margin-top: 2rem;
+        }
+
+        .vertical-connector {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin: 0.5rem 0;
+        }
+
+        .connector-line {
+            width: 2px;
+            height: 30px;
+            background: var(--accent-cyan);
+        }
+
+        .arrow-down {
+            color: var(--accent-cyan);
+            font-size: 1.2rem;
+        }
+
+        .phase-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 1rem;
+            margin-top: 1rem;
+        }
+
+        .phase-card {
+            background: var(--bg-card);
+            border-radius: 8px;
+            padding: 1rem;
+            border: 1px solid var(--border-color);
+            transition: all 0.3s ease;
+        }
+
+        .phase-card:hover {
+            border-color: var(--accent-cyan);
+        }
+
+        .phase-id {
+            display: inline-block;
+            background: var(--accent-orange);
+            color: white;
+            padding: 0.2rem 0.6rem;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: bold;
+            margin-bottom: 0.5rem;
+        }
+
+        .phase-name {
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 0.3rem;
+        }
+
+        .phase-desc {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }
+
+        .data-structure {
+            background: var(--bg-card);
+            border-radius: 8px;
+            padding: 1.2rem;
+            margin-top: 1rem;
+        }
+
+        .struct-name {
+            font-family: 'Courier New', monospace;
+            color: var(--accent-purple);
+            font-weight: 600;
+            margin-bottom: 0.8rem;
+        }
+
+        .struct-field {
+            display: flex;
+            gap: 1rem;
+            padding: 0.4rem 0;
+            border-bottom: 1px dashed var(--border-color);
+            font-size: 0.9rem;
+        }
+
+        .struct-field:last-child {
+            border-bottom: none;
+        }
+
+        .field-name {
+            color: var(--accent-cyan);
+            font-family: 'Courier New', monospace;
+            min-width: 180px;
+        }
+
+        .field-type {
+            color: var(--accent-orange);
+            font-family: 'Courier New', monospace;
+        }
+
+        .field-desc {
+            color: var(--text-secondary);
+        }
+
+        .timeline {
+            position: relative;
+            padding-left: 2rem;
+        }
+
+        .timeline::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 2px;
+            background: linear-gradient(to bottom, var(--accent-green), var(--accent-blue), var(--accent-purple));
+        }
+
+        .timeline-item {
+            position: relative;
+            padding: 1rem;
+            margin-bottom: 1rem;
+            background: var(--bg-card);
+            border-radius: 8px;
+            margin-left: 1rem;
+        }
+
+        .timeline-item::before {
+            content: '';
+            position: absolute;
+            left: -2.1rem;
+            top: 1.2rem;
+            width: 12px;
+            height: 12px;
+            background: var(--accent-cyan);
+            border-radius: 50%;
+            border: 2px solid var(--bg-primary);
+        }
+
+        .timeline-time {
+            font-size: 0.8rem;
+            color: var(--accent-orange);
+            margin-bottom: 0.3rem;
+        }
+
+        .timeline-title {
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 0.3rem;
+        }
+
+        .timeline-content {
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+        }
+
+        .highlight-box {
+            background: linear-gradient(135deg, rgba(34, 211, 238, 0.1), rgba(167, 139, 250, 0.1));
+            border: 1px solid var(--accent-cyan);
+            border-radius: 8px;
+            padding: 1.2rem;
+            margin: 1rem 0;
+        }
+
+        .highlight-title {
+            font-weight: 600;
+            color: var(--accent-cyan);
+            margin-bottom: 0.8rem;
+        }
+
+        .key-point {
+            display: flex;
+            align-items: flex-start;
+            gap: 0.5rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .key-icon {
+            color: var(--accent-green);
+            margin-top: 0.2rem;
+        }
+
+        .memory-layout {
+            display: flex;
+            gap: 0.5rem;
+            margin: 1rem 0;
+            flex-wrap: wrap;
+        }
+
+        .mem-block {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 0.8rem;
+            text-align: center;
+            min-width: 150px;
+        }
+
+        .mem-header {
+            background: var(--accent-purple);
+            color: white;
+            padding: 0.3rem;
+            border-radius: 4px 4px 0 0;
+            margin: -0.8rem -0.8rem 0.8rem;
+            font-weight: 600;
+            font-size: 0.85rem;
+        }
+
+        .mem-content {
+            font-family: 'Courier New', monospace;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }
+
+        .interaction-diagram {
+            background: var(--bg-card);
+            border-radius: 12px;
+            padding: 2rem;
+            margin: 1.5rem 0;
+        }
+
+        .interaction-container {
+            display: flex;
+            justify-content: space-around;
+            align-items: stretch;
+            gap: 2rem;
+            flex-wrap: wrap;
+        }
+
+        .component {
+            background: var(--bg-secondary);
+            border: 2px solid var(--border-color);
+            border-radius: 12px;
+            padding: 1.5rem;
+            min-width: 280px;
+            flex: 1;
+            max-width: 400px;
+        }
+
+        .component-header {
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 2px solid;
+        }
+
+        .component.orch {
+            border-color: var(--accent-green);
+        }
+
+        .component.orch .component-header {
+            color: var(--accent-green);
+            border-color: var(--accent-green);
+        }
+
+        .component.sched {
+            border-color: var(--accent-blue);
+        }
+
+        .component.sched .component-header {
+            color: var(--accent-blue);
+            border-color: var(--accent-blue);
+        }
+
+        .component.sm {
+            border-color: var(--accent-purple);
+        }
+
+        .component.sm .component-header {
+            color: var(--accent-purple);
+            border-color: var(--accent-purple);
+        }
+
+        .queue-box {
+            background: var(--bg-card);
+            border-radius: 6px;
+            padding: 0.6rem;
+            margin: 0.4rem 0;
+            font-size: 0.9rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .queue-icon {
+            font-size: 1.1rem;
+        }
+
+        .queue-name {
+            font-family: 'Courier New', monospace;
+            color: var(--accent-cyan);
+        }
+
+        .queue-size {
+            color: var(--text-secondary);
+            font-size: 0.8rem;
+            margin-left: auto;
+        }
+
+        .arrow-connection {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--accent-cyan);
+            font-size: 2rem;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+        }
+
+        th, td {
+            padding: 0.75rem;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        th {
+            background: var(--bg-card);
+            color: var(--accent-cyan);
+            font-weight: 600;
+        }
+
+        td {
+            font-size: 0.9rem;
+        }
+
+        tr:hover td {
+            background: var(--bg-card);
+        }
+
+        .code-inline {
+            font-family: 'Courier New', monospace;
+            background: var(--bg-card);
+            padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+            font-size: 0.85rem;
+            color: var(--accent-orange);
+        }
+
+        .tag {
+            display: inline-block;
+            padding: 0.2rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            margin-right: 0.3rem;
+        }
+
+        .tag-sync {
+            background: rgba(34, 211, 238, 0.2);
+            color: var(--accent-cyan);
+        }
+
+        .tag-atomic {
+            background: rgba(167, 139, 250, 0.2);
+            color: var(--accent-purple);
+        }
+
+        .tag-lock {
+            background: rgba(251, 146, 60, 0.2);
+            color: var(--accent-orange);
+        }
+
+        footer {
+            text-align: center;
+            padding: 2rem;
+            color: var(--text-secondary);
+            border-top: 1px solid var(--border-color);
+            margin-top: 2rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>PTO2 任务提交与调度交互分析</h1>
+            <p class="subtitle">pto2_submit_task 与 AicpuExecutor::resolve_and_dispatch_pto2 交互逻辑深度解析</p>
+        </header>
+
+        <section class="section">
+            <h2 class="section-title">一、概述</h2>
+            <p style="color: var(--text-secondary); margin-bottom: 1rem;">
+                PTO2（Process Tensor Orchestration 2）是用于异构计算平台的任务调度系统。该系统由两个核心组件构成：
+            </p>
+            <div class="highlight-box">
+                <div class="highlight-title">系统架构概览</div>
+                <div class="key-point">
+                    <span class="key-icon">◆</span>
+                    <span><strong>Orchestrator（协调器）</strong>: 负责任务图构建、依赖分析、缓冲区分配</span>
+                </div>
+                <div class="key-point">
+                    <span class="key-icon">◆</span>
+                    <span><strong>Scheduler（调度器）</strong>: 负责任务分发、状态管理、核心分配</span>
+                </div>
+            </div>
+            <p style="color: var(--text-secondary); margin-top: 1rem;">
+                两个组件通过<strong>共享内存（Shared Memory）</strong>进行通信，实现无锁的并发任务处理。
+            </p>
+        </section>
+
+        <section class="section">
+            <h2 class="section-title">二、核心函数定位</h2>
+            
+            <div class="function-box orchestrator">
+                <div class="function-name">pto2_submit_task</div>
+                <div class="function-location">文件: pto_orchestrator.cpp, 行号: 221</div>
+                <p style="color: var(--text-secondary);">
+                    在 Orchestrator 线程中执行，负责构建任务依赖图、分配缓冲区、注册任务到调度器。
+                </p>
+            </div>
+
+            <div class="function-box scheduler">
+                <div class="function-name scheduler-fn">AicpuExecutor::resolve_and_dispatch_pto2</div>
+                <div class="function-location">文件: aicpu_executor.cpp, 行号: 778</div>
+                <p style="color: var(--text-secondary);">
+                    在 AICPU 调度线程中执行，负责检查任务完成状态、分发就绪任务到空闲核心。
+                </p>
+            </div>
+        </section>
+
+        <section class="section">
+            <h2 class="section-title">三、交互流程图</h2>
+            
+            <div class="flow-diagram">
+                <h3 style="text-align: center; color: var(--accent-purple); margin-bottom: 1.5rem;">
+                    PTO2 任务生命周期流程
+                </h3>
+                
+                <!-- Orchestrator 侧流程 -->
+                <div class="flow-container" style="flex-wrap: wrap; justify-content: center;">
+                    <div class="flow-step">
+                        <div class="step-box" style="border-color: var(--accent-green);">
+                            <div class="step-number" style="background: var(--accent-green);">1</div>
+                            <div class="step-title">pto2_submit_task</div>
+                            <div class="step-desc">任务提交入口</div>
+                        </div>
+                    </div>
+                    <div class="arrow">→</div>
+                    
+                    <div class="flow-step">
+                        <div class="step-box">
+                            <div class="step-number">2</div>
+                            <div class="step-title">TaskRing Alloc</div>
+                            <div class="step-desc">分配任务槽位</div>
+                        </div>
+                    </div>
+                    <div class="arrow">→</div>
+                    
+                    <div class="flow-step">
+                        <div class="step-box">
+                            <div class="step-number">3</div>
+                            <div class="step-title">HeapRing Alloc</div>
+                            <div class="step-desc">分配输出缓冲区</div>
+                        </div>
+                    </div>
+                    <div class="arrow">→</div>
+                    
+                    <div class="flow-step">
+                        <div class="step-box">
+                            <div class="step-number">4</div>
+                            <div class="step-title">TensorMap Lookup</div>
+                            <div class="step-desc">查找输入依赖</div>
+                        </div>
+                    </div>
+                    <div class="arrow">→</div>
+                    
+                    <div class="flow-step">
+                        <div class="step-box">
+                            <div class="step-number">5</div>
+                            <div class="step-title">TensorMap Insert</div>
+                            <div class="step-desc">注册输出tensor</div>
+                        </div>
+                    </div>
+                    <div class="arrow">→</div>
+                    
+                    <div class="flow-step">
+                        <div class="step-box">
+                            <div class="step-number">6</div>
+                            <div class="step-title">ReadyQueue Push</div>
+                            <div class="step-desc">加入就绪队列</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 分隔线 -->
+                <div style="text-align: center; margin: 1.5rem 0; color: var(--accent-orange);">
+                    ════════════════════════════════════════════ 共享内存交互 ════════════════════════════════════════════
+                </div>
+
+                <!-- Scheduler 侧流程 -->
+                <div class="flow-container" style="flex-wrap: wrap; justify-content: center;">
+                    <div class="flow-step">
+                        <div class="step-box" style="border-color: var(--accent-blue);">
+                            <div class="step-number" style="background: var(--accent-blue);">A</div>
+                            <div class="step-title">resolve_and_dispatch</div>
+                            <div class="step-desc">调度循环入口</div>
+                        </div>
+                    </div>
+                    <div class="arrow">→</div>
+                    
+                    <div class="flow-step">
+                        <div class="step-box">
+                            <div class="step-number">B</div>
+                            <div class="step-title">Check Completion</div>
+                            <div class="step-desc">检查运行核心完成</div>
+                        </div>
+                    </div>
+                    <div class="arrow">→</div>
+                    
+                    <div class="flow-step">
+                        <div class="step-box">
+                            <div class="step-number">C</div>
+                            <div class="step-title">Notify Consumers</div>
+                            <div class="step-desc">通知消费者任务</div>
+                        </div>
+                    </div>
+                    <div class="arrow">→</div>
+                    
+                    <div class="flow-step">
+                        <div class="step-box">
+                            <div class="step-number">D</div>
+                            <div class="step-title">ReadyQueue Pop</div>
+                            <div class="step-desc">取出就绪任务</div>
+                        </div>
+                    </div>
+                    <div class="arrow">→</div>
+                    
+                    <div class="flow-step">
+                        <div class="step-box">
+                            <div class="step-number">E</div>
+                            <div class="step-title">Dispatch to Core</div>
+                            <div class="step-desc">分发到AIC/AIV核心</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="section">
+            <h2 class="section-title">四、共享内存数据结构</h2>
+            
+            <div class="memory-layout">
+                <div class="mem-block">
+                    <div class="mem-header">SharedMemoryHeader</div>
+                    <div class="mem-content">
+                        • heap_top<br>
+                        • current_task_index<br>
+                        • orchestrator_done<br>
+                        • last_task_alive<br>
+                        • heap_tail
+                    </div>
+                </div>
+                <div class="mem-block">
+                    <div class="mem-header">TaskDescriptor[]</div>
+                    <div class="mem-content">
+                        • task_id<br>
+                        • kernel_id<br>
+                        • worker_type<br>
+                        • fanin_count<br>
+                        • fanout_head/count
+                    </div>
+                </div>
+                <div class="mem-block">
+                    <div class="mem-header">TaskPayload[]</div>
+                    <div class="mem-content">
+                        • tensors[16]<br>
+                        • scalar_value[16]<br>
+                        • is_tensor[16]<br>
+                        • fanin_tasks[16]
+                    </div>
+                </div>
+            </div>
+
+            <div class="data-structure">
+                <div class="struct-name">PTO2TaskDescriptor (任务描述符)</div>
+                <div class="struct-field">
+                    <span class="field-name">task_id</span>
+                    <span class="field-type">int32_t</span>
+                    <span class="field-desc">唯一任务标识符</span>
+                </div>
+                <div class="struct-field">
+                    <span class="field-name">kernel_id</span>
+                    <span class="field-type">int32_t</span>
+                    <span class="field-desc">InCore函数ID</span>
+                </div>
+                <div class="struct-field">
+                    <span class="field-name">worker_type</span>
+                    <span class="field-type">int32_t</span>
+                    <span class="field-desc">目标工作类型: CUBE/VECTOR/AI_CPU/ACCELERATOR</span>
+                </div>
+                <div class="struct-field">
+                    <span class="field-name">fanin_count</span>
+                    <span class="field-type">int32_t</span>
+                    <span class="field-desc">生产者依赖数量</span>
+                </div>
+                <div class="struct-field">
+                    <span class="field-name">fanout_lock</span>
+                    <span class="field-type">std::atomic&lt;int32_t&gt;</span>
+                    <span class="field-desc">fanout链表自旋锁</span>
+                </div>
+                <div class="struct-field">
+                    <span class="field-name">fanout_head</span>
+                    <span class="field-type">PTO2DepListEntry*</span>
+                    <span class="field-desc">消费者链表头指针</span>
+                </div>
+                <div class="struct-field">
+                    <span class="field-name">fanout_count</span>
+                    <span class="field-type">int32_t</span>
+                    <span class="field-desc">消费者数量 (1=持有scope引用)</span>
+                </div>
+            </div>
+        </section>
+
+        <section class="section">
+            <h2 class="section-title">五、pto2_submit_task 详细流程</h2>
+            
+            <div class="phase-grid">
+                <div class="phase-card">
+                    <div class="phase-id">STEP 0</div>
+                    <div class="phase-name">Sync TensorMap</div>
+                    <div class="phase-desc">同步TensorMap有效性，可选清理</div>
+                </div>
+                <div class="phase-card">
+                    <div class="phase-id">STEP 1</div>
+                    <div class="phase-name">TaskRing Alloc</div>
+                    <div class="phase-desc">从任务环分配任务槽位（阻塞直到可用）</div>
+                </div>
+                <div class="phase-card">
+                    <div class="phase-id">STEP 2</div>
+                    <div class="phase-name">Params Processing</div>
+                    <div class="phase-desc">处理输入/输出参数，复制tensor数据</div>
+                </div>
+                <div class="phase-card">
+                    <div class="phase-id">STEP 3</div>
+                    <div class="phase-name">HeapRing Alloc</div>
+                    <div class="phase-desc">从堆环分配打包输出缓冲区</div>
+                </div>
+                <div class="phase-card">
+                    <div class="phase-id">STEP 4</div>
+                    <div class="phase-name">TensorMap Lookup</div>
+                    <div class="phase-desc">查找输入tensor的生产者，构建fanin依赖</div>
+                </div>
+                <div class="phase-card">
+                    <div class="phase-id">STEP 5</div>
+                    <div class="phase-name">TensorMap Insert</div>
+                    <div class="phase-desc">将输出tensor注册到TensorMap</div>
+                </div>
+                <div class="phase-card">
+                    <div class="phase-id">STEP 6</div>
+                    <div class="phase-name">Fanout Build</div>
+                    <div class="phase-desc">将当前任务加入生产者的fanout链表</div>
+                </div>
+                <div class="phase-card">
+                    <div class="phase-id">STEP 7</div>
+                    <div class="phase-name">ReadyQueue Push</div>
+                    <div class="phase-desc">如果所有依赖满足，加入就绪队列</div>
+                </div>
+            </div>
+
+            <div class="highlight-box" style="margin-top: 1.5rem;">
+                <div class="highlight-title">关键同步机制</div>
+                <div class="key-point">
+                    <span class="key-icon">🔒</span>
+                    <span><span class="tag tag-lock">自旋锁</span> fanout_lock 保护fanout链表的并发访问</span>
+                </div>
+                <div class="key-point">
+                    <span class="key-icon">⚡</span>
+                    <span><span class="tag tag-atomic">原子操作</span> fetch_add 用于 fanin_refcount 计数</span>
+                </div>
+                <div class="key-point">
+                    <span class="key-icon">📊</span>
+                    <span><span class="tag tag-sync">内存序</span> 使用 memory_order_acq_rel 保证同步</span>
+                </div>
+            </div>
+        </section>
+
+        <section class="section">
+            <h2 class="section-title">六、resolve_and_dispatch_pto2 详细流程</h2>
+            
+            <div class="timeline">
+                <div class="timeline-item">
+                    <div class="timeline-time">Phase 0</div>
+                    <div class="timeline-title">初始化与等待</div>
+                    <div class="timeline-content">
+                        获取共享内存指针，初始化性能统计，进行一次性初始化（性能缓冲区分配）
+                    </div>
+                </div>
+                <div class="timeline-item">
+                    <div class="timeline-time">Phase 1</div>
+                    <div class="timeline-title">检查任务完成</div>
+                    <div class="timeline-content">
+                        检查运行中的AIC/AIV核心是否有任务完成，调用 <code class="code-inline">check_running_cores_for_completion</code>
+                    </div>
+                </div>
+                <div class="timeline-item">
+                    <div class="timeline-time">Phase 2</div>
+                    <div class="timeline-title">处理完成通知</div>
+                    <div class="timeline-content">
+                        对于完成的任务，遍历fanout链表，通知所有消费者任务，通过 <code class="code-inline">release_fanin_and_check_ready</code> 减少依赖计数
+                    </div>
+                </div>
+                <div class="timeline-item">
+                    <div class="timeline-time">Phase 3</div>
+                    <div class="timeline-title">分发就绪任务</div>
+                    <div class="timeline-content">
+                        从ReadyQueue中取出就绪任务，分发到空闲的AIC/AIV核心，调用 <code class="code-inline">dispatch_ready_tasks_to_idle_cores</code>
+                    </div>
+                </div>
+                <div class="timeline-item">
+                    <div class="timeline-time">Phase 4</div>
+                    <div class="timeline-title">处理延迟释放</div>
+                    <div class="timeline-content">
+                        批量处理延迟的fanin释放，调用 <code class="code-inline">on_task_release</code> 遍历fanin列表释放生产者
+                    </div>
+                </div>
+                <div class="timeline-item">
+                    <div class="timeline-time">Phase 5</div>
+                    <div class="timeline-title">检查完成条件</div>
+                    <div class="timeline-content">
+                        如果所有任务完成（completed_tasks >= total_tasks），退出调度循环
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="section">
+            <h2 class="section-title">七、组件交互图</h2>
+            
+            <div class="interaction-diagram">
+                <div class="interaction-container">
+                    <div class="component orch">
+                        <div class="component-header">🔧 Orchestrator</div>
+                        <div style="font-size: 0.9rem; color: var(--text-secondary); margin-bottom: 1rem;">
+                            任务提交端
+                        </div>
+                        <div class="queue-box">
+                            <span class="queue-icon">📋</span>
+                            <span class="queue-name">TensorMap</span>
+                        </div>
+                        <div class="queue-box">
+                            <span class="queue-icon">🔄</span>
+                            <span class="queue-name">TaskRing</span>
+                        </div>
+                        <div class="queue-box">
+                            <span class="queue-icon">🗃️</span>
+                            <span class="queue-name">HeapRing</span>
+                        </div>
+                        <div class="queue-box">
+                            <span class="queue-icon">🔗</span>
+                            <span class="queue-name">DepPool</span>
+                        </div>
+                    </div>
+
+                    <div class="arrow-connection">⇄</div>
+
+                    <div class="component sm">
+                        <div class="component-header">💾 Shared Memory</div>
+                        <div style="font-size: 0.9rem; color: var(--text-secondary); margin-bottom: 1rem;">
+                            通信桥梁
+                        </div>
+                        <div class="queue-box">
+                            <span class="queue-icon">📦</span>
+                            <span class="queue-name">TaskDescriptor[]</span>
+                        </div>
+                        <div class="queue-box">
+                            <span class="queue-icon">📦</span>
+                            <span class="queue-name">TaskPayload[]</span>
+                        </div>
+                        <div class="queue-box">
+                            <span class="queue-icon">📑</span>
+                            <span class="queue-name">SM Header</span>
+                        </div>
+                    </div>
+
+                    <div class="arrow-connection">⇄</div>
+
+                    <div class="component sched">
+                        <div class="component-header">⚙️ Scheduler (AICPU)</div>
+                        <div style="font-size: 0.9rem; color: var(--text-secondary); margin-bottom: 1rem;">
+                            任务调度端
+                        </div>
+                        <div class="queue-box">
+                            <span class="queue-icon">✅</span>
+                            <span class="queue-name">ReadyQueue[CUBE]</span>
+                        </div>
+                        <div class="queue-box">
+                            <span class="queue-icon">✅</span>
+                            <span class="queue-name">ReadyQueue[VECTOR]</span>
+                        </div>
+                        <div class="queue-box">
+                            <span class="queue-icon">📊</span>
+                            <span class="queue-name">task_state[]</span>
+                        </div>
+                        <div class="queue-box">
+                            <span class="queue-icon">🔢</span>
+                            <span class="queue-name">fanin_refcount[]</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="section">
+            <h2 class="section-title">八、任务状态转换</h2>
+            
+            <table>
+                <thead>
+                    <tr>
+                        <th>状态</th>
+                        <th>名称</th>
+                        <th>描述</th>
+                        <th>转换条件</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><span class="tag tag-sync">PENDING</span></td>
+                        <td>等待中</td>
+                        <td>等待依赖完成</td>
+                        <td>fanin_refcount &lt; fanin_count</td>
+                    </tr>
+                    <tr>
+                        <td><span class="tag tag-sync">READY</span></td>
+                        <td>就绪</td>
+                        <td>所有依赖已满足，等待调度</td>
+                        <td>fanin_refcount == fanin_count</td>
+                    </tr>
+                    <tr>
+                        <td><span class="tag tag-lock">RUNNING</span></td>
+                        <td>运行中</td>
+                        <td>正在核心上执行</td>
+                        <td>被调度到AIC/AIV核心</td>
+                    </tr>
+                    <tr>
+                        <td><span class="tag tag-atomic">COMPLETED</span></td>
+                        <td>已完成</td>
+                        <td>核心执行完成，输出可用</td>
+                        <td>硬件核心报告完成</td>
+                    </tr>
+                    <tr>
+                        <td><span class="tag tag-sync">CONSUMED</span></td>
+                        <td>已消费</td>
+                        <td>所有消费者已完成，缓冲区可释放</td>
+                        <td>fanout_refcount == fanout_count</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <section class="section">
+            <h2 class="section-title">九、ReadyQueue 实现</h2>
+            
+            <p style="color: var(--text-secondary); margin-bottom: 1rem;">
+                PTO2使用无锁的MPMC（多生产者多消费者）队列，基于 Dmitry Vyukov 的设计：
+            </p>
+            
+            <div class="data-structure">
+                <div class="struct-name">PTO2ReadyQueue 关键特性</div>
+                <div class="struct-field">
+                    <span class="field-name">enqueue_pos</span>
+                    <span class="field-type">atomic&lt;uint64&gt;</span>
+                    <span class="field-desc">生产者位置（独立缓存行）</span>
+                </div>
+                <div class="struct-field">
+                    <span class="field-name">dequeue_pos</span>
+                    <span class="field-type">atomic&lt;uint64&gt;</span>
+                    <span class="field-desc">消费者位置（独立缓存行）</span>
+                </div>
+                <div class="struct-field">
+                    <span class="field-name">slots[]</span>
+                    <span class="field-type">ReadyQueueSlot[]</span>
+                    <span class="field-desc">每槽包含sequence计数器防止ABA问题</span>
+                </div>
+            </div>
+        </section>
+
+        <section class="section">
+            <h2 class="section-title">十、关键代码路径</h2>
+            
+            <h3 style="color: var(--accent-green); margin: 1rem 0;">pto2_submit_task 核心代码路径</h3>
+            <pre style="background: var(--bg-card); padding: 1rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; color: var(--text-secondary);">
+// 1. 分配任务槽位
+int32_t task_id = task_ring.pto2_task_ring_alloc();
+
+// 2. 查找输入依赖
+orch->tensor_map.lookup(payload->tensors[i], lookup_result);
+
+// 3. 注册输出
+orch->tensor_map.insert(payload->tensors[i], task_id, is_output);
+
+// 4. 构建fanout链表（带自旋锁）
+pto2_fanout_lock(producer);
+producer.fanout_head = orch->dep_pool_cur_entry;
+pto2_fanout_unlock(producer);
+
+// 5. 检查是否就绪并加入队列
+if (new_rc >= fanin_count + 1) {
+    sched->ready_queues[task.worker_type].push(task_id);
+}</pre>
+
+            <h3 style="color: var(--accent-blue); margin: 1.5rem 0 1rem;">resolve_and_dispatch_pto2 核心代码路径</h3>
+            <pre style="background: var(--bg-card); padding: 1rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; color: var(--text-secondary);">
+// 1. 检查运行中的核心是否完成
+check_running_cores_for_completion&lt;CoreType::AIC&gt;(...);
+
+// 2. 通知消费者
+while (current != nullptr) {
+    release_fanin_and_check_ready(consumer_id, consumer);
+    current = current->next;
+}
+
+// 3. 从就绪队列取出任务
+int32_t task_id = ready_queues[CUBE].pop();
+
+// 4. 分发到空闲核心
+dispatch_ready_tasks_to_idle_cores&lt;CoreType::AIC&gt;(...);</pre>
+        </section>
+
+        <section class="section">
+            <h2 class="section-title">十一、性能优化要点</h2>
+            
+            <div class="phase-grid">
+                <div class="phase-card">
+                    <div class="phase-name" style="color: var(--accent-cyan);">1. 无锁设计</div>
+                    <div class="phase-desc">
+                        调度器使用原子操作和内存序，避免使用锁。fanout链表使用轻量级自旋锁。
+                    </div>
+                </div>
+                <div class="phase-card">
+                    <div class="phase-name" style="color: var(--accent-cyan);">2. 缓存行对齐</div>
+                    <div class="phase-desc">
+                        ReadyQueue的enqueue_pos和dequeue_pos分别位于不同缓存行，避免伪共享。
+                    </div>
+                </div>
+                <div class="phase-card">
+                    <div class="phase-name" style="color: var(--accent-cyan);">3. 批量处理</div>
+                    <div class="phase-desc">
+                        空闲时批量处理延迟的fanin释放，减少锁竞争。
+                    </div>
+                </div>
+                <div class="phase-card">
+                    <div class="phase-name" style="color: var(--accent-cyan);">4. 早期就绪优化</div>
+                    <div class="phase-desc">
+                        如果生产者已完成的消费者，直接减少依赖计数，避免加入fanout链表。
+                    </div>
+                </div>
+                <div class="phase-card">
+                    <div class="phase-name" style="color: var(--accent-cyan);">5. 延迟释放</div>
+                    <div class="phase-desc">
+                        不在任务完成时立即释放生产者，延迟到空闲时批量处理。
+                    </div>
+                </div>
+                <div class="phase-card">
+                    <div class="phase-name" style="color: var(--accent-cyan);">6. 数据局部性</div>
+                    <div class="phase-desc">
+                        TaskPayload与TaskDescriptor分离，保证热路径（完成检查）的缓存效率。
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="section">
+            <h2 class="section-title">十二、总结</h2>
+            
+            <div class="highlight-box">
+                <div class="highlight-title">pto2_submit_task 与 resolve_and_dispatch_pto2 的关系</div>
+                <div class="key-point">
+                    <span class="key-icon">🔗</span>
+                    <span><strong>生产者-消费者模式</strong>: pto2_submit_task 构建任务依赖图并提交任务，resolve_and_dispatch_pto2 消费就绪任务并执行</span>
+                </div>
+                <div class="key-point">
+                    <span class="key-icon">📤</span>
+                    <span><strong>共享内存通信</strong>: 通过 TaskDescriptor、TaskPayload 和 ReadyQueue 进行无锁数据交换</span>
+                </div>
+                <div class="key-point">
+                    <span class="key-icon">⏱️</span>
+                    <span><strong>流水线并行</strong>: Orchestrator 可以持续提交任务，Scheduler 并行执行，形成流水线</span>
+                </div>
+                <div class="key-point">
+                    <span class="key-icon">🔄</span>
+                    <span><strong>依赖传播</strong>: Scheduler 在任务完成时通过 fanout 链表传播完成信号，触发消费者就绪</span>
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <footer>
+        <p>PTO2 任务调度系统分析报告 | 生成于 2024</p>
+    </footer>
+</body>
+</html>
