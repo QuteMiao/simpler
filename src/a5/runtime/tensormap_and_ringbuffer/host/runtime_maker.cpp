@@ -70,17 +70,17 @@ static uint64_t parse_env_uint64(const char *name, uint64_t min_val, bool requir
     return static_cast<uint64_t>(val);
 }
 
-static int32_t pto2_read_runtime_status(Runtime *runtime, PTO2SharedMemoryHeader *host_header) {
+static int32_t read_runtime_status(Runtime *runtime, PTO2SharedMemoryHeader *host_header) {
     if (runtime == nullptr || host_header == nullptr) {
         return 0;
     }
 
-    void *pto2_sm = runtime->get_pto2_gm_sm_ptr();
-    if (pto2_sm == nullptr) {
+    void *sm_ptr = runtime->get_gm_sm_ptr();
+    if (sm_ptr == nullptr) {
         return 0;
     }
 
-    int hdr_rc = runtime->host_api.copy_from_device(host_header, pto2_sm, sizeof(PTO2SharedMemoryHeader));
+    int hdr_rc = runtime->host_api.copy_from_device(host_header, sm_ptr, sizeof(PTO2SharedMemoryHeader));
     if (hdr_rc != 0) {
         LOG_WARN("Failed to copy PTO2 header from device");
         return 0;
@@ -88,7 +88,7 @@ static int32_t pto2_read_runtime_status(Runtime *runtime, PTO2SharedMemoryHeader
 
     int32_t orch_error_code = host_header->orch_error_code.load(std::memory_order_relaxed);
     int32_t sched_error_code = host_header->sched_error_code.load(std::memory_order_relaxed);
-    return pto2_runtime_status_from_error_codes(orch_error_code, sched_error_code);
+    return runtime_status_from_error_codes(orch_error_code, sched_error_code);
 }
 
 /**
@@ -233,23 +233,22 @@ extern "C" int init_runtime_impl(Runtime *runtime, const ChipCallable *callable,
 
     // Read ring buffer size overrides from environment
     {
-        runtime->pto2_task_window_size = parse_env_uint64("PTO2_RING_TASK_WINDOW", 4, true);
-        runtime->pto2_heap_size = parse_env_uint64("PTO2_RING_HEAP", 1024, true);
-        runtime->pto2_dep_pool_size = parse_env_uint64("PTO2_RING_DEP_POOL", 4, false);
-        if (runtime->pto2_task_window_size || runtime->pto2_heap_size || runtime->pto2_dep_pool_size) {
+        runtime->task_window_size = parse_env_uint64("PTO2_RING_TASK_WINDOW", 4, true);
+        runtime->heap_size = parse_env_uint64("PTO2_RING_HEAP", 1024, true);
+        runtime->dep_pool_size = parse_env_uint64("PTO2_RING_DEP_POOL", 4, false);
+        if (runtime->task_window_size || runtime->heap_size || runtime->dep_pool_size) {
             LOG_INFO(
                 "Ring buffer overrides: task_window=%" PRIu64 " heap=%" PRIu64 " dep_pool=%" PRIu64,
-                (uint64_t)(runtime->pto2_task_window_size ? runtime->pto2_task_window_size : PTO2_TASK_WINDOW_SIZE),
-                (uint64_t)(runtime->pto2_heap_size ? runtime->pto2_heap_size : PTO2_HEAP_SIZE),
-                (uint64_t)(runtime->pto2_dep_pool_size ? runtime->pto2_dep_pool_size : PTO2_DEP_LIST_POOL_SIZE)
+                (uint64_t)(runtime->task_window_size ? runtime->task_window_size : PTO2_TASK_WINDOW_SIZE),
+                (uint64_t)(runtime->heap_size ? runtime->heap_size : PTO2_HEAP_SIZE),
+                (uint64_t)(runtime->dep_pool_size ? runtime->dep_pool_size : PTO2_DEP_LIST_POOL_SIZE)
             );
         }
     }
 
     // Resolve effective sizes (env override or compile-time default)
-    uint64_t eff_heap_size = runtime->pto2_heap_size ? runtime->pto2_heap_size : PTO2_HEAP_SIZE;
-    uint64_t eff_task_window_size =
-        runtime->pto2_task_window_size ? runtime->pto2_task_window_size : PTO2_TASK_WINDOW_SIZE;
+    uint64_t eff_heap_size = runtime->heap_size ? runtime->heap_size : PTO2_HEAP_SIZE;
+    uint64_t eff_task_window_size = runtime->task_window_size ? runtime->task_window_size : PTO2_TASK_WINDOW_SIZE;
 
     // Allocate GM heap for orchestrator output buffers (all rings combined)
     uint64_t total_heap_size = eff_heap_size * PTO2_MAX_RING_DEPTH;
@@ -261,18 +260,18 @@ extern "C" int init_runtime_impl(Runtime *runtime, const ChipCallable *callable,
         return -1;
     }
     runtime->record_tensor_pair(nullptr, gm_heap, total_heap_size);
-    runtime->set_pto2_gm_heap(gm_heap);
+    runtime->set_gm_heap(gm_heap);
 
     // Allocate PTO2 shared memory
     int64_t t_sm_start = _now_ms();
-    uint64_t sm_size = pto2_sm_calculate_size(eff_task_window_size);
+    uint64_t sm_size = PTO2SharedMemoryHandle::calculate_size(eff_task_window_size);
     void *sm_ptr = runtime->host_api.device_malloc(sm_size);
     int64_t t_sm_end = _now_ms();
     if (sm_ptr == nullptr) {
         LOG_ERROR("Failed to allocate PTO2 shared memory");
         return -1;
     }
-    runtime->set_pto2_gm_sm_ptr(sm_ptr);
+    runtime->set_gm_sm_ptr(sm_ptr);
     runtime->record_tensor_pair(nullptr, sm_ptr, static_cast<size_t>(sm_size));
 
     // Set up device orchestration state
@@ -326,7 +325,7 @@ extern "C" int validate_runtime_impl(Runtime *runtime) {
     PTO2SharedMemoryHeader host_header;
     memset(&host_header, 0, sizeof(host_header));
 
-    runtime_status = pto2_read_runtime_status(runtime, &host_header);
+    runtime_status = read_runtime_status(runtime, &host_header);
     if (runtime_status != 0) {
         int32_t orch_error_code = host_header.orch_error_code.load(std::memory_order_relaxed);
         int32_t sched_error_code = host_header.sched_error_code.load(std::memory_order_relaxed);

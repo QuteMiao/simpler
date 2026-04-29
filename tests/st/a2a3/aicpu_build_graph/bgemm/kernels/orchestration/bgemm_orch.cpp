@@ -28,7 +28,7 @@
  *     P = A[m,k] @ B[k,n]    (gemm_tile on Cube core, func_id=0)
  *     C[m,n] = C[m,n] + P    (tile_add on Vector core, func_id=1)
  *
- * Dependencies are explicit via pto2_rt_add_dependency:
+ * Dependencies are explicit via rt_add_dependency:
  *   - gemm(k) -> add(k): add reads P which gemm produces
  *   - add(k-1) -> add(k): add reads/writes C_view (K accumulation chain)
  *
@@ -105,19 +105,19 @@ aicpu_orchestration_entry(PTO2Runtime *rt, const ChipStorageTaskArgs &orch_args)
                         args_gemm.add_input(A_view);
                         args_gemm.add_input(B_view);
                         args_gemm.add_output(TensorCreateInfo(tile_shapes, 1, DataType::FLOAT32));
-                        SubmitResult r_gemm = pto2_rt_submit_aic_task(rt, FUNC_GEMM_TILE, args_gemm);
+                        SubmitResult r_gemm = rt_submit_aic_task(rt, FUNC_GEMM_TILE, args_gemm);
 
                         // C[m,n] += P
                         Arg args_add;
                         args_add.add_inout(C_view);
                         args_add.add_input(r_gemm.outputs.get_ref(0));
-                        SubmitResult r_add = pto2_rt_submit_aiv_task(rt, FUNC_TILE_ADD, args_add);
+                        SubmitResult r_add = rt_submit_aiv_task(rt, FUNC_TILE_ADD, args_add);
 
                         // gemm -> add: add reads P which gemm produces
-                        pto2_rt_add_dependency(rt, r_gemm.task_id, r_add.task_id);
+                        rt_add_dependency(rt, r_gemm.task_id, r_add.task_id);
                         // K accumulation chain: previous add -> current add
                         if (has_last_add) {
-                            pto2_rt_add_dependency(rt, last_add_task, r_add.task_id);
+                            rt_add_dependency(rt, last_add_task, r_add.task_id);
                         }
 
                         last_add_task = r_add.task_id;
