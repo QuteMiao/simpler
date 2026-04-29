@@ -125,7 +125,7 @@ struct PTO2OrchestratorState {
     void report_fatal(int32_t error_code, const char *func, const char *fmt, ...);
     void begin_scope(PTO2ScopeMode mode = PTO2ScopeMode::AUTO);
     void end_scope();
-    TaskOutputTensors submit_task(const MixedKernels &mixed_kernels, const Arg &args, bool complete_in_future);
+    TaskOutputTensors submit_task(const MixedKernels &mixed_kernels, const Arg &args);
     TaskOutputTensors alloc_tensors(const Arg &args);
     void mark_done();
 };

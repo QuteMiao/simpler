@@ -52,6 +52,7 @@
 
 #include <stdint.h>
 
+#include "pto_completion_ingress.h"
 #include "pto_task_id.h"
 
 #ifndef __gm__
@@ -64,8 +65,6 @@
 
 /** Number of extra pointer slots appended to the args[] tail (LocalContext + GlobalContext). */
 static constexpr int32_t PTO2_EXT_PARAMS_COUNT = 2;
-
-struct PTO2DeferredCompletionIngressBuffer;
 
 /**
  * Args[] suffix indices for context pointers.
@@ -89,6 +88,28 @@ struct GlobalContext {
     int32_t sub_block_id;
 };
 
+struct AsyncCtx {
+    volatile __gm__ uint32_t *completion_count;
+    volatile __gm__ int32_t *completion_error_code;
+    volatile __gm__ PTO2DeferredCompletionEntry *completion_entries;
+    uint32_t completion_capacity;
+    PTO2TaskId task_token;
+
+    static inline AsyncCtx make(PTO2TaskId task_token, volatile __gm__ PTO2DeferredCompletionIngressBuffer *buffer) {
+        AsyncCtx ctx{};
+        ctx.task_token = task_token;
+        if (buffer == nullptr) {
+            ctx.task_token = PTO2TaskId::invalid();
+            return ctx;
+        }
+        ctx.completion_count = &buffer->count;
+        ctx.completion_error_code = &buffer->error_code;
+        ctx.completion_entries = &buffer->entries[0];
+        ctx.completion_capacity = PTO2_MAX_COMPLETIONS_PER_TASK;
+        return ctx;
+    }
+};
+
 /**
  * Per-dispatch local context, stored in PTO2DispatchPayload.
  * Written by build_payload() before each dispatch. Different blocks of the
@@ -101,9 +122,7 @@ struct LocalContext {
                         // Currently fixed to 1 (block_dim > 1 not yet implemented).
                         // NOT the same as RUNTIME_CONFIG.block_dim in kernel_config.py,
                         // which controls how many physical cores the runtime launches.
-    PTO2TaskId task_token;
-    volatile __gm__ PTO2DeferredCompletionIngressBuffer *deferred_ingress;
-    uint32_t deferred_completion_capacity;
+    AsyncCtx async_ctx;
 };
 
 /**

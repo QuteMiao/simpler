@@ -123,9 +123,10 @@ private:
     // buf_idx = reg_task_id & 1; adjacent dispatches alternate automatically.
     PTO2DispatchPayload payload_per_core_[RUNTIME_MAX_WORKER][2];
 
-    // Per-core deferred-completion ingress storage.  This has the same runtime
-    // lifetime as payload_per_core_, but is kept out of the dispatch payload so
-    // normal task dispatch layout and cache footprint stay unchanged.
+    // Per-core deferred-completion software registration storage.  This has
+    // the same runtime lifetime as payload_per_core_, but is kept out of the
+    // dispatch payload so normal task dispatch layout and cache footprint stay
+    // unchanged.
     PTO2DeferredCompletionIngressBuffer deferred_ingress_per_core_[RUNTIME_MAX_WORKER][2];
 
     // sync_start drain coordination
@@ -209,7 +210,7 @@ private:
 
     void build_payload(
         PTO2DispatchPayload &dispatch_payload, PTO2TaskSlotState &slot_state, PTO2SubtaskSlot subslot,
-        PTO2DeferredCompletionIngressBuffer *deferred_ingress
+        const AsyncCtx &async_ctx
     );
 
     void dispatch_subtask_to_core(

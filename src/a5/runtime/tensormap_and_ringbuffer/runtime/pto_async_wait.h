@@ -16,8 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "aicpu/platform_regs.h"
-#include "common/memory_barrier.h"
+#include "intrinsic.h"
 #include "pto_completion_ingress.h"
 #include "pto_runtime2_types.h"
 
@@ -28,43 +27,8 @@ struct PTO2CompletionStats;
 inline constexpr int32_t PTO2_MAX_ASYNC_WAITS = 64;
 inline constexpr int32_t PTO2_MAX_PENDING_COMPLETIONS = 128;
 
-inline uintptr_t completion_ingress_cache_line(const volatile void *addr) {
-    return reinterpret_cast<uintptr_t>(addr) & ~(uintptr_t(PTO2_ALIGN_SIZE) - 1u);
-}
-
-inline void completion_ingress_invalidate_entries(
-    volatile PTO2CompletionIngressQueue *completion_ingress, uint64_t tail, uint64_t head
-) {
-    uint64_t active_count = head - tail;
-    if (active_count == 0) return;
-
-    uint64_t tail_index = tail & PTO2_COMPLETION_INGRESS_MASK;
-    uint64_t first_span = active_count;
-    uint64_t contiguous_capacity = PTO2_COMPLETION_INGRESS_CAPACITY - tail_index;
-    if (first_span > contiguous_capacity) {
-        first_span = contiguous_capacity;
-    }
-
-    cache_invalidate_range(
-        const_cast<const void *>(reinterpret_cast<volatile void *>(&completion_ingress->entries[tail_index])),
-        first_span * sizeof(PTO2CompletionIngressEntry)
-    );
-
-    uint64_t remaining = active_count - first_span;
-    if (remaining == 0) return;
-
-    cache_invalidate_range(
-        const_cast<const void *>(reinterpret_cast<volatile void *>(&completion_ingress->entries[0])),
-        remaining * sizeof(PTO2CompletionIngressEntry)
-    );
-}
-
 inline bool completion_ingress_has_pending(volatile PTO2CompletionIngressQueue *completion_ingress) {
     if (completion_ingress == nullptr) return false;
-    cache_invalidate_range(
-        const_cast<const void *>(reinterpret_cast<volatile void *>(&completion_ingress->head)),
-        sizeof(completion_ingress->head)
-    );
     uint64_t head = __atomic_load_n(&completion_ingress->head, __ATOMIC_ACQUIRE);
     uint64_t tail = __atomic_load_n(&completion_ingress->tail, __ATOMIC_ACQUIRE);
     return tail < head;
@@ -167,13 +131,8 @@ struct PTO2AsyncWaitList {
         int32_t drained = 0;
         while (true) {
             uint64_t tail = __atomic_load_n(&completion_ingress->tail, __ATOMIC_ACQUIRE);
-            cache_invalidate_range(
-                const_cast<const void *>(reinterpret_cast<volatile void *>(&completion_ingress->head)),
-                sizeof(completion_ingress->head)
-            );
             uint64_t head_snapshot = __atomic_load_n(&completion_ingress->head, __ATOMIC_ACQUIRE);
             if (tail >= head_snapshot) break;
-            completion_ingress_invalidate_entries(completion_ingress, tail, head_snapshot);
 
             while (tail < head_snapshot) {
                 volatile PTO2CompletionIngressEntry *slot =
@@ -187,14 +146,8 @@ struct PTO2AsyncWaitList {
                 uint32_t expected_value = slot->expected_value;
                 PTO2AsyncEngine engine = static_cast<PTO2AsyncEngine>(slot->engine);
 
-                slot->seq = 0;
-                completion_ingress->tail = tail + 1;
-                OUT_OF_ORDER_STORE_BARRIER();
-                cache_flush_range(const_cast<const void *>(reinterpret_cast<volatile void *>(slot)), sizeof(*slot));
-                cache_flush_range(
-                    const_cast<const void *>(reinterpret_cast<volatile void *>(&completion_ingress->tail)),
-                    sizeof(completion_ingress->tail)
-                );
+                __atomic_store_n(&slot->seq, 0, __ATOMIC_RELEASE);
+                __atomic_store_n(&completion_ingress->tail, tail + 1, __ATOMIC_RELEASE);
                 drained++;
                 tail++;
 
@@ -266,47 +219,44 @@ struct PTO2AsyncWaitList {
         return true;
     }
 
-    RegisterResult register_deferred(
-        PTO2TaskSlotState &slot_state, volatile PTO2DeferredCompletionIngressBuffer *ingress, bool normal_done,
-        int32_t &error_code
-    ) {
+    RegisterResult
+    register_deferred(PTO2TaskSlotState &slot_state, const AsyncCtx &async_ctx, bool normal_done, int32_t &error_code) {
         error_code = PTO2_ERROR_NONE;
-        PTO2TaskPayload *payload = slot_state.payload;
-        if (payload == nullptr || !payload->complete_in_future) {
+        if (slot_state.payload == nullptr) {
             return RegisterResult::NotDeferred;
         }
 
         if (!try_lock()) return RegisterResult::Skipped;
 
         uint32_t deferred_count = 0;
-        if (ingress != nullptr) {
-            cache_invalidate_range(
-                const_cast<const void *>(reinterpret_cast<volatile void *>(ingress)), PTO2_ALIGN_SIZE
-            );
-            if (ingress->error_code != PTO2_ERROR_NONE) {
-                error_code = ingress->error_code;
-                unlock();
-                return RegisterResult::Error;
+        if (async_ctx.completion_count != nullptr) {
+            if (async_ctx.completion_error_code != nullptr) {
+                if (*async_ctx.completion_error_code != PTO2_ERROR_NONE) {
+                    error_code = *async_ctx.completion_error_code;
+                    unlock();
+                    return RegisterResult::Error;
+                }
             }
-            deferred_count = ingress->count;
+            deferred_count = *async_ctx.completion_count;
         }
-        if (deferred_count > PTO2_MAX_COMPLETIONS_PER_TASK) {
+        if (deferred_count > async_ctx.completion_capacity) {
             error_code = PTO2_ERROR_ASYNC_REGISTRATION_FAILED;
             unlock();
             return RegisterResult::Error;
         }
-        if (deferred_count > 0 && ingress != nullptr) {
-            cache_invalidate_range(
-                const_cast<const void *>(reinterpret_cast<volatile void *>(ingress->entries)),
-                deferred_count * sizeof(PTO2DeferredCompletionEntry)
-            );
+        if (deferred_count > 0) {
+            if (async_ctx.completion_entries == nullptr) {
+                error_code = PTO2_ERROR_ASYNC_REGISTRATION_FAILED;
+                unlock();
+                return RegisterResult::Error;
+            }
         }
         PTO2AsyncWaitEntry *entry = find_entry_by_token(slot_state.task->task_id);
+        if (entry == nullptr && deferred_count == 0) {
+            unlock();
+            return RegisterResult::NotDeferred;
+        }
         if (entry == nullptr) {
-            if (!normal_done && deferred_count == 0) {
-                unlock();
-                return RegisterResult::Registered;
-            }
             if (count >= PTO2_MAX_ASYNC_WAITS) {
                 error_code = PTO2_ERROR_ASYNC_WAIT_OVERFLOW;
                 unlock();
@@ -324,11 +274,7 @@ struct PTO2AsyncWaitList {
         }
 
         for (uint32_t i = 0; i < deferred_count; ++i) {
-            volatile PTO2DeferredCompletionEntry *deferred = &ingress->entries[i];
-            volatile uint32_t *counter = reinterpret_cast<volatile uint32_t *>(static_cast<uintptr_t>(deferred->addr));
-            cache_invalidate_range(
-                reinterpret_cast<const void *>(completion_ingress_cache_line(counter)), sizeof(uint32_t)
-            );
+            volatile PTO2DeferredCompletionEntry *deferred = &async_ctx.completion_entries[i];
             if (!append_condition_locked(
                     *entry, deferred->addr, deferred->expected_value, static_cast<PTO2AsyncEngine>(deferred->engine),
                     error_code

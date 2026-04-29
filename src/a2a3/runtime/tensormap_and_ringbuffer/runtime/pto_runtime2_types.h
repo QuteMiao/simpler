@@ -242,7 +242,6 @@ struct PTO2TaskPayload {
     int32_t scalar_count{0};
     int32_t fanin_actual_count{0};  // Actual fanin count (without the +1 redundance)
     int32_t fanin_spill_start{0};   // Linear start index in fanin spill pool (0 = no spill)
-    bool complete_in_future{false};
     PTO2FaninPool *fanin_spill_pool{nullptr};
     PTO2TaskSlotState *fanin_inline_slot_states[PTO2_FANIN_INLINE_CAP];
     // === Cache lines 9-40 (2048B) — tensors (alignas(64) forces alignment) ===
@@ -264,10 +263,7 @@ struct PTO2TaskPayload {
      * @param args                Task arguments (tensors + scalars)
      * @param result  Materialized output tensors (from TensorCreateInfo path)
      */
-    void init(
-        const Arg &args, TaskOutputTensors &result, PTO2TaskAllocResult &alloc_result, PTO2OutputLayout &layout,
-        bool complete_in_future_flag
-    ) {
+    void init(const Arg &args, TaskOutputTensors &result, PTO2TaskAllocResult &alloc_result, PTO2OutputLayout &layout) {
         tensor_count = args.tensor_count();
         scalar_count = args.scalar_count();
 
@@ -289,15 +285,13 @@ struct PTO2TaskPayload {
         // Round up to cache line boundary. Both arrays are 1024B so no overrun.
         // Eliminates branches; extra bytes within the same CL have zero additional cost.
         memcpy(scalars, args.scalars(), PTO2_ALIGN_UP(args.scalar_count() * sizeof(uint64_t), 64));
-        complete_in_future = complete_in_future_flag;
     }
 };
 
 // PTO2TaskPayload layout verification (offsetof requires complete type).
-static_assert(offsetof(PTO2TaskPayload, complete_in_future) == 16, "deferred flag must stay in the first cache line");
-static_assert(offsetof(PTO2TaskPayload, fanin_spill_pool) == 24, "spill pool pointer layout drift");
+static_assert(offsetof(PTO2TaskPayload, fanin_spill_pool) == 16, "spill pool pointer layout drift");
 static_assert(
-    offsetof(PTO2TaskPayload, fanin_inline_slot_states) == 32, "inline fanin array must follow spill metadata"
+    offsetof(PTO2TaskPayload, fanin_inline_slot_states) == 24, "inline fanin array must follow spill metadata"
 );
 static_assert(offsetof(PTO2TaskPayload, tensors) == 576, "tensors must start at byte 576 (cache line 9)");
 static_assert(

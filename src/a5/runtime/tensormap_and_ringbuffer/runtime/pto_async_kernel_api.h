@@ -28,49 +28,78 @@
 #define __gm__
 #endif
 
-struct PTO2AsyncCtx {
-    volatile __gm__ PTO2DeferredCompletionIngressBuffer *ingress;
-    uint32_t entry_capacity;
-    PTO2TaskId task_token;
-};
+inline __aicore__ void defer_load_ingress(AsyncCtx &ctx) {
+    if (ctx.completion_count == nullptr) return;
+#if defined(__CCE_KT_TEST__) || defined(__CCE_AICORE__) || defined(__DAV_C220__)
+    uintptr_t line = reinterpret_cast<uintptr_t>(ctx.completion_count) & ~(uintptr_t(PTO2_ALIGN_SIZE) - 1u);
+    dcci((__gm__ int32_t *)line, SINGLE_CACHE_LINE);
+#else
+    __asm__ __volatile__("" ::: "memory");
+#endif
+}
 
-inline __aicore__ PTO2AsyncCtx pto2_async_ctx(__gm__ int64_t *args) {
+inline __aicore__ AsyncCtx get_async_ctx(__gm__ int64_t *args) {
     __gm__ LocalContext *lc =
         reinterpret_cast<__gm__ LocalContext *>(static_cast<uintptr_t>(args[PAYLOAD_LOCAL_CONTEXT_INDEX]));
-    PTO2AsyncCtx ctx;
-    ctx.ingress = lc->deferred_ingress;
-    ctx.entry_capacity = lc->deferred_completion_capacity;
-    ctx.task_token.raw = lc->task_token.raw;
+    AsyncCtx ctx = lc->async_ctx;
+    defer_load_ingress(ctx);
     return ctx;
 }
 
-inline __aicore__ void pto2_defer_condition(
-    PTO2AsyncCtx &ctx, volatile __gm__ void *addr, uint32_t expected, uint32_t engine, int32_t completion_type
+inline __aicore__ void defer_condition(
+    AsyncCtx &ctx, volatile __gm__ void *addr, uint32_t expected, uint32_t engine, int32_t completion_type
 ) {
-    if (ctx.task_token.is_invalid() || ctx.ingress == nullptr) {
+    if (ctx.task_token.is_invalid() || ctx.completion_count == nullptr || ctx.completion_entries == nullptr) {
         return;
     }
 
-    uint32_t idx = ctx.ingress->count;
-    if (idx >= ctx.entry_capacity) {
-        ctx.ingress->error_code = PTO2_ERROR_ASYNC_WAIT_OVERFLOW;
+    uint32_t idx = *ctx.completion_count;
+    if (idx >= ctx.completion_capacity) {
+        if (ctx.completion_error_code != nullptr) {
+            *ctx.completion_error_code = PTO2_ERROR_ASYNC_WAIT_OVERFLOW;
+        }
         return;
     }
 
-    volatile __gm__ PTO2DeferredCompletionEntry *slot = &ctx.ingress->entries[idx];
+    volatile __gm__ PTO2DeferredCompletionEntry *slot = &ctx.completion_entries[idx];
     slot->addr = reinterpret_cast<uint64_t>(addr);
     slot->expected_value = expected;
     slot->engine = engine;
     slot->completion_type = completion_type;
     slot->_pad = 0;
-    ctx.ingress->count = idx + 1;
+    *ctx.completion_count = idx + 1;
 }
 
-inline __aicore__ void pto2_defer_flush(PTO2AsyncCtx &ctx) {
-    if (ctx.task_token.is_invalid() || ctx.ingress == nullptr) return;
+inline __aicore__ void defer_flush_range(volatile __gm__ void *addr, uint32_t size_bytes) {
+    if (addr == nullptr || size_bytes == 0) return;
 #if defined(__CCE_KT_TEST__) || defined(__CCE_AICORE__) || defined(__DAV_C220__)
-    dcci((__gm__ int32_t *)ctx.ingress->entries, ENTIRE_DATA_CACHE, CACHELINE_OUT);
-    dcci((__gm__ int32_t *)ctx.ingress, SINGLE_CACHE_LINE, CACHELINE_OUT);
+    uintptr_t start = reinterpret_cast<uintptr_t>(addr) & ~(uintptr_t(PTO2_ALIGN_SIZE) - 1u);
+    uintptr_t end =
+        (reinterpret_cast<uintptr_t>(addr) + size_bytes + PTO2_ALIGN_SIZE - 1u) & ~(uintptr_t(PTO2_ALIGN_SIZE) - 1u);
+    for (uintptr_t p = start; p < end; p += PTO2_ALIGN_SIZE) {
+        dcci((__gm__ int32_t *)p, SINGLE_CACHE_LINE, CACHELINE_OUT);
+    }
+#else
+    (void)addr;
+    (void)size_bytes;
+#endif
+}
+
+inline __aicore__ void defer_flush(AsyncCtx &ctx) {
+    if (ctx.task_token.is_invalid() || ctx.completion_count == nullptr) return;
+#if defined(__CCE_KT_TEST__) || defined(__CCE_AICORE__) || defined(__DAV_C220__)
+    uint32_t count = *ctx.completion_count;
+    if (count > ctx.completion_capacity) {
+        count = ctx.completion_capacity;
+    }
+    uint32_t flush_bytes = static_cast<uint32_t>(sizeof(*ctx.completion_count));
+    if (ctx.completion_error_code != nullptr) {
+        flush_bytes += static_cast<uint32_t>(sizeof(*ctx.completion_error_code));
+    }
+    if (ctx.completion_entries != nullptr) {
+        flush_bytes += count * static_cast<uint32_t>(sizeof(PTO2DeferredCompletionEntry));
+    }
+    defer_flush_range(ctx.completion_count, flush_bytes);
 #if defined(__CPU_SIM)
     dsb(0);
 #else
@@ -90,12 +119,10 @@ pto2_send_notification(volatile __gm__ void *remote_counter_addr, int32_t value,
     pto::comm::TNOTIFY(signal, value, notify_op);
 }
 
-inline __aicore__ void pto2_save_expected_notification_counter(
-    __gm__ int64_t *args, volatile __gm__ void *counter_addr, uint32_t expected_value
-) {
-    PTO2AsyncCtx ctx = pto2_async_ctx(args);
-    pto2_defer_condition(ctx, counter_addr, expected_value, PTO2_COMPLETION_ENGINE_SDMA, PTO2_COMPLETION_TYPE_COUNTER);
-    pto2_defer_flush(ctx);
+inline __aicore__ void
+save_expected_notification_counter(AsyncCtx &ctx, volatile __gm__ void *counter_addr, uint32_t expected_value) {
+    defer_condition(ctx, counter_addr, expected_value, PTO2_COMPLETION_ENGINE_SDMA, PTO2_COMPLETION_TYPE_COUNTER);
+    defer_flush(ctx);
 }
 
 #endif  // PTO_ASYNC_KERNEL_API_H
